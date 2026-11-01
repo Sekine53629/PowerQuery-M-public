@@ -16,7 +16,7 @@ Psychiatric-clinic-adjacent pharmacy (tablets only). Keep the stock that avoids 
 - 予定とのずれ = 払出 − 予定; can be + (ad-hoc, new, re-visits, dose up) or − (discontinued, leftover adjustment, no-show). Monthly sums cancel within a month (treat magnitude as a lower bound).
 - Drugs unmoved since before the oldest loaded 出納 month appear nowhere (needs a full stock list once).
 - No YJ code in any export. Key = normalized drug name (出納: 品名). 略称 (column B) is display-only.
-- 出納 file: `yyyymmdd_yyyymmdd_数量一覧.xls`, one sheet, header row 1, 10 fixed columns. Analysis-data file: prefix `薬品使用量`, daily sheets `10月1日(水)`, header row 1 merged with blank row 2.
+- 出納 file: `yyyymmdd_yyyymmdd_数量一覧.xls`, one sheet, 10 fixed columns. Header row = the row containing 品名; rows above it may carry 出力日/期間. Period = first in-file date pair (前 ≦ 後) above the header, else the two 8-digit numbers in the file name. Real-file layout above the header is not yet confirmed with a sample. Analysis-data file: prefix `薬品使用量`, daily sheets `10月1日(水)`, header row 1 merged with blank row 2.
 
 ## Tables (data model)
 | Table | Grain | Keys |

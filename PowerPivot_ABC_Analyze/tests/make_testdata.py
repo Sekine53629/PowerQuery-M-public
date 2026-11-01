@@ -176,7 +176,11 @@ def main():
     # ---- 出納（実際）：その月に動いた薬だけ。品名の一部は先頭に空白、スルピリドは全角のまま ----
     SHDR = ["製剤コード", "製剤", "コード", "品名", "繰越数量", "仕入数量", "払出数量", "在庫数量", "単位", "棚番"]
     for m in month_iter():
-        rows = [SHDR]
+        # 見出しより上の行：出力日と期間（⑤ はここから期間を読む。なければファイル名から）
+        rows = [["数量一覧", None, f"出力日：{month_end(m) + dt.timedelta(days=1):%Y/%m/%d}"],
+                [None, None, f"期間：{m:%Y/%m/%d}～{month_end(m):%Y/%m/%d}"],
+                [],
+                SHDR]
         for i, (n, ab, kind, *_) in enumerate(DRUGS):
             if kind == "planonly":
                 pass
