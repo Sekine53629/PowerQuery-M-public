@@ -1,0 +1,49 @@
+# ===== Tier 1 baseline =====
+# Secrets
+.env
+*.pem
+*.key
+credentials*.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# Build artifacts
+__pycache__/
+*.pyc
+node_modules/
+dist/
+build/
+!archive/dist/
+
+# Data provided by the user (input/ is the drop-off point; contents are never committed)
+input/*
+!input/README.md
+!input/.gitkeep
+**/input/*
+!**/input/README.md
+!**/input/.gitkeep
+
+# External reference files: only the catalog is committed
+references/*
+!references/catalog.csv
+!references/README.md
+archive/references/*
+!archive/references/.gitkeep
+
+# ===== M言語 (Power Query) =====
+# 実データは置かない（念のため除外）
+**/data/
+**/実データ/
+# テストの生成物
+**/tests/out/
+# Excel の一時ファイル
+~$*
+# 貼り付け用 txt はリポジトリに含める（build.py の成果物）
+!**/dist/

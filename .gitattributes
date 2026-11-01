@@ -1,0 +1,10 @@
+# 行末の規則（Tier 1 File Encoding）：ソースは LF、貼り付け用 txt（dist/）は CRLF
+*               text=auto eol=lf
+*.m             text eol=lf
+*.py            text eol=lf
+*.md            text eol=lf
+*.txt           text eol=lf
+**/dist/*.txt   text eol=crlf
+*.pdf           binary
+*.xls           binary
+*.xlsx          binary

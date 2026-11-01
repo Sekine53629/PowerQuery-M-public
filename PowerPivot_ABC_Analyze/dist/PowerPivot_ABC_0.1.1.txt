@@ -1,0 +1,1112 @@
+================================================================================
+ 在庫分析 PowerPivot_ABC：在庫の必要性を判断するためのデータ（データモデル）と判定理由
+ 版：0.1.1（0.1.0 の M_薬品「出どころ」の判定を修正）
+   0.1.1 での変更：⑨ 予定だけの薬が「予定・出納」になっていたのを直した（テストデータで発見）
+   0.1.0：PowerQuery_ABC 0.3.1 の在庫分析部分を分けたもの
+   ・発注支援（PowerQuery_ABC）とは別のブックで使う
+   ・⓪①②③④ は PowerQuery_ABC（⓪①②③㉒）と同じコード。直すときは両方を同じに直す
+   ・0.3.1 からの違い：M_薬品 は ABC判定 を使わない（区分の列なし）。経過措置は
+     経過措置リストのテーブルから直接読む。略称は実績からだけ取る
+   まだの変更：最終の判定（J1～J4：持つ／最小在庫だけ持つ／持たない／移動・返品の候補）、
+     需要のまとまりの期間による切り替え（出荷調整）、ピボットレポート
+ 作成：関根禎浩　2026-11-02
+================================================================================
+
+■ このブックでできること（月1回）
+  出納（実際の動き）と薬品使用量分析データ（定期の予定）を、データモデルの6つの表にためる
+    T_日次       ：日付×薬品の予定数量・予定患者数・在庫量
+    T_月次       ：月×薬品の繰越・仕入・払出・その他の増減・在庫と、予定・予定とのずれ
+    M_日付       ：日付・年月・期・曜日・処方のあった日・卸の営業日
+    M_薬品       ：略称・単位・棚番・経過措置・発注除外・グループと、需要の型・在庫日数・
+                   動きのない月数・予定とのずれ などの指標
+    T_判定理由   ：薬品×理由コード（例：S01「3ヶ月、不動です。（在庫 200）」）
+    M_理由コード ：コード・種類（警告／注意／情報）・優先度・文言・条件
+  ピボットテーブル（レポート）は、この6つの表から作る
+
+■ 読み込むファイル（エリシアSの出力。列名・ファイル名は ① に固定で書いてある）
+  ・薬品使用量分析データ（実績フォルダ）
+                ファイル名：「薬品使用量」で始まり、後ろに yyyymm を付ける（例：薬品使用量分析データ202610.xls）
+                シート：「期間すべて」は読まない。「10月10日(土)」のシートを日付として読む
+                列：製剤／略称（B列）／薬品名／患者数／予定使用量／在庫数量（発注残を含まない）／在庫数量 …
+                → 予定使用量・患者数は次回来局予定から作られた数（定期の予定）
+                   臨時処方・新患・他科・飛び処方は入らない
+  ・出納（出納フォルダ）
+                ファイル名：エリシアSが付けたまま（例：20261001_20261031_数量一覧.xls）
+                → 8桁の日付2つを期間として読む。「数量一覧」を含む名前だけ読む
+                シート：1枚、1行目が見出し
+                列：製剤コード／製剤／コード／品名／繰越数量／仕入数量／払出数量／在庫数量／単位／棚番
+                → その月に動いた薬だけが載る。動きのない薬の在庫は、最後に載った月の在庫と同じ
+                → さかのぼって出せるだけ保存する。暦の月ごとに出力する
+  ※ 実績フォルダと出納フォルダは分ける。このブックはどちらにも置かない
+  ※ .xls が読めないときは、Excel で開いて .xlsx で保存し直す
+
+--------------------------------------------------------------------------------
+■ 準備（分析用ブック）
+--------------------------------------------------------------------------------
+ 手で作るテーブルは、PowerPivot_初期テーブル作成.txt のクエリで作れる（リンク解除して使う）。
+ テーブル名で読むので、シート名は何でもよい
+
+ 1. 設定（必須）：A列「項目」・B列「値」。計算に使う値とフォルダだけ。空欄は初期値
+
+     項目                         | 値（例）                     | 空欄のとき
+     -----------------------------+------------------------------+----------------------
+     フォルダパス                 | C:\薬局\使用量分析_実績      | 必須（薬品使用量分析データ）
+     開始日                       | 2025/10/01                   | 必須（実績を読む期間）
+     終了日                       | 2026/09/30                   | 必須
+     出納フォルダパス             | C:\薬局\出納                 | 必須
+     標準の包装単位               | 100                          | 100（在庫情報に包装単位がない薬）
+     年末年始の休み始め           | 12/29                        | 12/29（M_日付 の卸の営業日）
+     年末年始の休み終わり         | 1/3                          | 1/3
+     発注日                       |                              | 今日（経過措置の残り日数の基準日）
+     不動とみなす月数             | 3                            | 3（S01：在庫があって、この月数動きなし）
+     在庫過多とみなす日数         | 60                           | 60（S02：在庫日数がこの日数以上）
+     1箱消化の注意日数            | 180                          | 180（S03：1箱を使い切るのにこの日数以上）
+     ずれの注意割合               | 0.3                          | 0.3（P01・P02：予定より30%以上多い／少ない）
+     ずれの大きさの注意割合       | 0.5                          | 0.5（P03：月ごとのずれの合計が予定の50%以上）
+
+ 2. 経過措置リスト（任意）：列「薬品名」「経過措置期限」（エリシアSの経過措置薬品リストを貼る）
+ 3. 発注除外（任意）：列「薬品名」「理由」「登録日」（不動確定・マスタ削除の薬）
+ 4. 在庫情報（任意）：列「薬品名」「包装単位」「列数」（1箱消化日数に使う。空欄は標準の包装単位）
+ 5. 追加休業日（任意）：列「日付」「理由」（卸が休む日。M_日付 の卸の営業日に使う）
+ 6. 薬品グループ（任意）：列「薬品名」「成分規格」「需要のまとまり」「先発後発」
+      ・成分規格      ：成分と規格（例：タンドスピロン 10mg）。屋号・先発後発をまとめて見るとき
+      ・需要のまとまり：入れ替えて使える薬の組。先発に固定の需要は先発だけの組にする
+      ・先発後発      ：先発／後発 など
+ ※ 2～6 は発注支援のブックと同じ内容でよい（コピーして貼る）
+ ※ 手入力テーブルの薬品名は、M_薬品 に出る薬品名（正規化後）と同じ表記で書く
+
+ 7. [データ]→[データの取得]→[クエリのオプション]→[現在のブック]→[プライバシー]
+    で「プライバシー レベルを無視…」を選ぶ（しないと Formula.Firewall のエラー）
+
+--------------------------------------------------------------------------------
+■ クエリの作り方
+--------------------------------------------------------------------------------
+ [データ]→[データの取得]→[その他のデータソースから]→[空のクエリ]
+ → [ホーム]→[詳細エディター] に下のコードを貼り付け → [完了]
+ → 右側「クエリの設定」の名前を見出しのとおりに変更
+ を、⓪から⑪まで順に12回繰り返す
+ ※ ②④は関数。貼り付けると値の入力画面が出るが、そのままでよい（[呼び出す]は押さない）
+
+   No. クエリ名              役割                                  読み込み先
+   ⓪  fx_正規化             表記ゆれをそろえる関数                接続のみ
+   ①  設定値                設定テーブルを読む                    接続のみ
+   ②  fx_使用量読込         薬品使用量分析データを読む関数        接続のみ
+   ③  日次データ            実績を日付・薬品ごとに並べる          接続のみ
+   ④  fx_卸の休み           卸の営業日・休みを判定する関数        接続のみ
+   ⑤  出納                  出納（月次）を全期間まとめて読む      接続のみ
+   ⑥  T_日次                日付×薬品の予定                       データモデル
+   ⑦  T_月次                月×薬品の出納と予定・予定とのずれ     データモデル
+   ⑧  M_日付                日付の表                              データモデル
+   ⑨  M_薬品                薬品の属性と指標                      データモデル
+   ⑩  M_理由コード          判定理由・警告のコード表              データモデル
+   ⑪  T_判定理由            薬品×理由コード（文言つき）           データモデル
+
+ 読み込み先の設定：エディターで[閉じて読み込む]の▼→[閉じて次に読み込む]→「接続の作成のみ」。
+ 「データモデル」のクエリは、さらに「このデータをデータモデルに追加する」にチェックを入れる
+
+ データモデルのリレーションシップ（最初に1回）：
+  [データ]→[リレーションシップ]→[新規作成] で次の6本を作る（Power Pivot がなくても作れる）
+     T_日次[日付]       → M_日付[日付]
+     T_月次[月]         → M_日付[日付]
+     T_日次[薬品名]     → M_薬品[薬品名]
+     T_月次[薬品名]     → M_薬品[薬品名]
+     T_判定理由[薬品名] → M_薬品[薬品名]
+     T_判定理由[コード] → M_理由コード[コード]
+  ※ 左が「テーブル（多）」、右が「関連テーブル（1）」
+
+■ 運用（月1回）
+  1. 前月分の薬品使用量分析データを実績フォルダに、出納を出納フォルダに保存する
+  2. 設定の開始日・終了日を1か月ずらす（実績を読む期間。出納はフォルダの全期間を読む）
+  3. [データ]→[すべて更新]
+  4. ピボットで T_判定理由 を優先度順に見る（警告 → 注意 → 情報）
+
+■ 注意
+  ・予定（分析データ）にも患者数にも、予定外の患者（臨時・新患・他科）は入らない
+  ・予定とのずれは月の合計どうし。同じ月の中のプラスとマイナスは打ち消し合う
+  ・出納のいちばん古い月より前から動いていない薬は、どこにも載らない（棚卸表などで補う）
+  ・単位は薬ごとに違う（錠・カプセル など）。数量は単位をまたいで合計しない
+  ・計算ロジックの Excel 上での動作は導入時に確認する
+
+
+// ================================================================================
+// ⓪ クエリ名：fx_正規化（関数・最初に作る）
+//    文字の表記ゆれをそろえる関数。読み込んだファイルと手入力テーブルの両方で使い、
+//    薬品名・列名の照合を「同じ表記」で行う
+//      ・全角の英数字・記号 → 半角（Ａ→A、５→5、（→(、－→-）
+//      ・半角カタカナ → 全角カタカナ（ﾃﾞｴﾋﾞｺﾞ→デエビゴ。濁点・半濁点もまとめる）
+//      ・全角空白 → 半角空白、「−」（マイナス記号）→「-」、前後の空白を取る
+//    1文字ずつ対応表を引くので、文字置換をくり返すより速い
+//    ※ 略称は表示用に元の表記のまま残す（エリシアSで呼び出すときの表記のため）
+// ================================================================================
+let
+    // 全角ASCII（！～～）→ 半角
+    AsciiFrom = List.Transform({65281 .. 65374}, Character.FromNumber),
+    AsciiTo   = List.Transform({65281 .. 65374}, each Character.FromNumber(_ - 65248)),
+    // 半角カタカナ（1文字）→ 全角
+    KanaFrom  = Text.ToList("｡｢｣､･ｦｧｨｩｪｫｬｭｮｯｰｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝﾞﾟ"),
+    KanaTo    = Text.ToList("。「」、・ヲァィゥェォャュョッーアイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワン゛゜"),
+    Map       = Record.FromList(AsciiTo & KanaTo & {" ", "-"}, AsciiFrom & KanaFrom & {"　", "−"}),
+    // 濁点・半濁点つきの半角カタカナ（2文字）→ 全角1文字。先にまとめて置き換える
+    Dakuten   = List.Zip({
+                    {"ｳﾞ", "ｶﾞ", "ｷﾞ", "ｸﾞ", "ｹﾞ", "ｺﾞ", "ｻﾞ", "ｼﾞ", "ｽﾞ", "ｾﾞ", "ｿﾞ", "ﾀﾞ", "ﾁﾞ", "ﾂﾞ", "ﾃﾞ", "ﾄﾞ",
+                     "ﾊﾞ", "ﾋﾞ", "ﾌﾞ", "ﾍﾞ", "ﾎﾞ", "ﾊﾟ", "ﾋﾟ", "ﾌﾟ", "ﾍﾟ", "ﾎﾟ"},
+                    {"ヴ", "ガ", "ギ", "グ", "ゲ", "ゴ", "ザ", "ジ", "ズ", "ゼ", "ゾ", "ダ", "ヂ", "ヅ", "デ", "ド",
+                     "バ", "ビ", "ブ", "ベ", "ボ", "パ", "ピ", "プ", "ペ", "ポ"}}),
+    HasHalfKana = (t as text) as logical => Text.Length(Text.Select(t, KanaFrom)) > 0,
+
+    Fn = (v as any) as nullable text =>
+        if v = null then null
+        else
+            let
+                t0 = Text.From(v),
+                t1 = if HasHalfKana(t0)
+                     then List.Accumulate(Dakuten, t0, (s, p) => Text.Replace(s, p{0}, p{1}))
+                     else t0,
+                t2 = Text.Combine(List.Transform(Text.ToList(t1), each Record.FieldOrDefault(Map, _, _)))
+            in
+                Text.Trim(t2)
+in
+    Fn
+
+
+// ================================================================================
+// ① クエリ名：設定値
+//    設定テーブル（計算に使う値とフォルダ）を読み込む
+//    エリシアSの出力の列名・ファイル名は決まっているので、ここに固定で書く（設定テーブルでは変えない）
+// ================================================================================
+let
+    Source = Excel.CurrentWorkbook(){[Name = "設定"]}[Content],
+    Typed  = Table.TransformColumnTypes(Source, {{"項目", type text}}),
+    Rec    = Record.FromList(Typed[値], Typed[項目]),
+
+    // 空欄なら初期値を返す
+    Get = (key as text, dflt as any) as any =>
+        let v = Record.FieldOrDefault(Rec, key, null)
+        in  if v = null or (v is text and Text.Trim(v) = "") then dflt else v,
+
+    // ---- 固定：薬品使用量分析データの列名（実績・予測とも同じ） ----
+    Cols = [
+        薬品名     = "薬品名",
+        数量       = "予定使用量",
+        在庫量     = "在庫数量（発注残を含まない）",
+        在庫量込み = "在庫数量",
+        薬品区分   = "製剤",
+        患者数     = "患者数",
+        略称       = "略称"
+    ],
+    ColsHist = Cols,
+    ColsFc   = Cols,
+    // ---- 固定：ファイル名 ----
+    //   薬品使用量分析データ：「薬品使用量」で始まる
+    //   出納（月次）        ：「数量一覧」を含む（例：20261001_20261031_数量一覧.xls）
+    Prefix    = "薬品使用量",
+    SuiMark   = "数量一覧",
+
+    // 発注日（空欄なら今日）
+    OrderRaw   = Get("発注日", null),
+    OrderDate  = if OrderRaw = null then Date.From(DateTime.LocalNow()) else Date.From(OrderRaw),
+    // 予測期間（予測開始日が空欄なら発注日の翌日から）
+    //   予測終了   ：区分別発注一覧（⑪）で使う「来週分」の終わり（予測日数）
+    //   予測読込終了：予測ファイルを読む終わり（予測の読込日数。発注シートで連休の先まで見るため）
+    FcStartRaw = Get("予測開始日", null),
+    FcStart    = if FcStartRaw = null then Date.AddDays(OrderDate, 1) else Date.From(FcStartRaw),
+    FcEnd      = Date.AddDays(FcStart, Number.From(Get("予測日数", 7)) - 1),
+    FcLoadEnd  = List.Max({FcEnd, Date.AddDays(FcStart, Number.From(Get("予測の読込日数", 14)) - 1)}),
+
+    // フォルダパスの前後の「"」・空白・末尾の「\」を取り除く
+    // （エクスプローラーの「パスのコピー」で付く「"」などに対応）
+    CleanPath = (v as any) as nullable text =>
+        if v = null then null
+        else Text.TrimEnd(Text.Trim(Text.Remove(Text.From(v), {""""})), {"\", "/", " ", "　"}),
+
+    Result = Rec & [列名 = Cols, 列名_実績 = ColsHist, 列名_予測 = ColsFc,
+                    先頭 = Prefix, 出納の目印 = SuiMark,
+                    発注日 = OrderDate, 予測開始 = FcStart, 予測終了 = FcEnd, 予測読込終了 = FcLoadEnd,
+                    フォルダパス     = CleanPath(Get("フォルダパス", null)),
+                    予測フォルダパス = CleanPath(Get("予測フォルダパス", null)),
+                    出納フォルダパス = CleanPath(Get("出納フォルダパス", null))]
+in
+    Result
+
+
+// ================================================================================
+// ② クエリ名：fx_使用量読込
+//    エリシアSの出力ファイル（.xls／.xlsx）を読む関数（実績・予測の両方で使う）
+//      folderPath ：読むフォルダ
+//      prefix     ：ファイル名の先頭（① で固定「薬品使用量」。分析データ・予測データどちらも読める）
+//      startDate, endDate：読む期間
+//      cols       ：① の [列名]
+//      keepZero   ：true なら使用量0の行も残す（在庫だけある薬を見るとき。省略時 false）
+//    出力列：日付／薬品区分／略称／薬品名／患者数／数量／在庫量／在庫量_発注残込み／ファイル名／シート名
+//
+//    .xls（互換形式）への対策
+//      ・シート一覧に Kind 列がなくても読む
+//      ・シート名に付く「'」と末尾の「$」を外してから日付を読む（'10月1日(水)$' → 10月1日(水)）
+//      ・名前の途中に「$」があるもの（印刷範囲などの名前）はシートとみなさない
+//      ・見出しは「薬品名」と書かれた行を探す。2行目の空欄（1行目と結合）は自動で読み飛ばす
+//    ファイル名の日付：先頭の後ろで最初に出てくる数字の並び（yyyymm または yyyymmdd）
+//      （「_」「-」「空白」などの区切りがあってもよい）
+//    薬品名・製剤は fx_正規化 でそろえる。略称は表示用にそのまま残す
+//    略称の列：見出し「略称」→「略称」を含む見出し→ B列 の順に探す
+// ================================================================================
+(folderPath as text, prefix as text, startDate as date, endDate as date, cols as record,
+ optional keepZero as nullable logical) as table =>
+let
+    Nz = #"fx_正規化",
+
+    // 列名の照合：表記をそろえ、空白を除き、かっこを全角にそろえる
+    Norm = (t as any) as text =>
+        let s = if t = null then "" else Nz(Text.From(t))
+        in  Text.Replace(Text.Replace(Text.Remove(s, {" ", "　", "#(lf)", "#(cr)", "#(tab)"}), "(", "（"), ")", "）"),
+
+    ColDrug  = Norm(cols[薬品名]),
+    ColQty   = Norm(cols[数量]),
+    ColStock = Norm(cols[在庫量]),
+    ColIncl  = Norm(Record.FieldOrDefault(cols, "在庫量込み", "")),
+    ColCat   = Norm(cols[薬品区分]),
+    ColPat   = Norm(cols[患者数]),
+    ColAbbr  = Norm(Record.FieldOrDefault(cols, "略称", "")),
+    KeepZero = keepZero = true,
+
+    OutType = type table [日付 = date, 薬品区分 = nullable text, 略称 = nullable text, 薬品名 = text,
+                          患者数 = nullable number, 数量 = nullable number, 在庫量 = nullable number,
+                          在庫量_発注残込み = nullable number, ファイル名 = text, シート名 = text],
+    Empty   = #table(OutType, {}),
+
+    ソース = Folder.Files(folderPath),
+    対象   = Table.SelectRows(ソース, each
+                 Text.StartsWith([Name], prefix)
+                 and not Text.StartsWith([Name], "~$")
+                 and Text.StartsWith(Text.Lower([Extension]), ".xls")),
+
+    // 先頭の後ろで最初に出てくる数字の並び（全角数字も可）
+    Digits = (nm as text) as text =>
+        let
+            s     = Nz(Text.BeforeDelimiter(Text.AfterDelimiter(nm, prefix), ".", {0, RelativePosition.FromEnd})),
+            chars = Text.ToList(s),
+            from  = List.PositionOfAny(chars, {"0" .. "9"}),
+            rest  = if from < 0 then {} else List.Skip(chars, from),
+            run   = List.FirstN(rest, each List.Contains({"0" .. "9"}, _))
+        in
+            Text.Combine(run),
+    年月追加 = Table.AddColumn(対象, "ファイル年月", each
+                 let d = Digits([Name])
+                 in  if Text.Length(d) >= 6
+                     then try #date(Number.FromText(Text.Start(d, 4)), Number.FromText(Text.Middle(d, 4, 2)), 1) otherwise null
+                     else null,
+                 type nullable date),
+    // 新しさの順番：ファイル名の日付（yyyymm は yyyymm00）→ 更新日時 → ファイル名
+    キー追加 = Table.AddColumn(年月追加, "並びキー", each
+                 let
+                     d  = Digits([Name]),
+                     d8 = if Text.Length(d) >= 8 then Text.Start(d, 8)
+                          else if Text.Length(d) >= 6 then Text.Start(d, 6) & "00" else "00000000",
+                     tm = try DateTime.ToText(DateTime.From([Date modified]), "yyyyMMddHHmmss") otherwise "00000000000000"
+                 in  d8 & "|" & tm & "|" & [Name], type text),
+
+    // 月をまたぐ週は前月のファイルに入ることがあるので、1か月前から見る
+    期間内ファイル = Table.SelectRows(キー追加, each
+                 [ファイル年月] <> null
+                 and [ファイル年月] >= Date.AddMonths(Date.StartOfMonth(startDate), -1)
+                 and [ファイル年月] <= endDate),
+
+    // 見出しの位置は後で探すので、ここでは見出しにしない。Kind 列があるときだけシートに絞る
+    シート取得 = Table.AddColumn(期間内ファイル, "Sheets", each
+                 let wb = Excel.Workbook([Content], null, true)
+                 in  if Table.HasColumns(wb, "Kind") then Table.SelectRows(wb, each [Kind] = "Sheet") else wb),
+    列選択     = Table.SelectColumns(シート取得, {"Name", "ファイル年月", "並びキー", "Sheets"}),
+    展開       = Table.ExpandTableColumn(列選択, "Sheets", {"Name", "Data"}, {"シート名", "Data"}),
+
+    // シート名をきれいにする：「'」を外し、末尾の「$」を外す。途中に「$」があるものは対象外
+    名前整形 = Table.AddColumn(展開, "シート名2", each
+                 let
+                     raw = Text.Trim(Text.Remove(Text.From([シート名]), {"'"})),
+                     cut = Text.TrimEnd(raw, "$")
+                 in  if Text.Contains(cut, "$") or Text.Contains(cut, "Print_") or Text.Contains(cut, "_xlnm")
+                     then null else Nz(cut), type nullable text),
+
+    // シート名「10月1日(水)」とファイル名の年月から日付を作る
+    //   月がファイルと同じ：ファイルの年月　／　月がファイルの翌月：翌月（12月→1月は翌年）
+    //   「期間」で始まるシート（期間すべて）と、それ以外の月は読まない
+    日付追加 = Table.AddColumn(名前整形, "日付", each try
+                 let
+                     s     = [シート名2],
+                     mPart = Text.Trim(Text.BeforeDelimiter(s, "月")),
+                     isDay = s <> null and not Text.StartsWith(s, "期間")
+                             and Text.Contains(s, "月") and Text.Contains(s, "日")
+                             and mPart <> "" and Text.Select(mPart, {"0" .. "9"}) = mPart,
+                     fy    = Date.Year([ファイル年月]),
+                     fm    = Date.Month([ファイル年月]),
+                     m     = Number.From(mPart),
+                     dd    = Number.From(Text.Select(Text.BetweenDelimiters(s, "月", "日"), {"0" .. "9"})),
+                     same  = m = fm,
+                     next  = m = (if fm = 12 then 1 else fm + 1),
+                     y     = if same then fy else if next and fm = 12 then fy + 1 else fy
+                 in
+                     if isDay and (same or next) then #date(y, m, dd) else null
+                 otherwise null, type nullable date),
+    日別のみ = Table.SelectRows(日付追加, each
+                 [日付] <> null and [日付] >= startDate and [日付] <= endDate),
+
+    // 同じ日付のシートが2つ以上あるときは、一番新しいファイルの1枚だけ残す
+    最新キー = Table.Group(日別のみ, {"日付"}, {{"採用キー", each List.Max([並びキー]), type text}}),
+    採用     = List.Buffer(Table.TransformRows(最新キー, each Date.ToText([日付], "yyyyMMdd") & "#" & [採用キー])),
+    日別最新 = Table.Distinct(
+                 Table.SelectRows(日別のみ, each List.Contains(採用, Date.ToText([日付], "yyyyMMdd") & "#" & [並びキー])),
+                 {"日付"}),
+
+    // 各シート：見出し行を探し、必要な列だけを取り出す
+    整形 = Table.AddColumn(日別最新, "表", each
+        let
+            d    = [日付],
+            f    = [Name],
+            s    = [シート名2],
+            raw  = [Data],
+            rows = Table.ToRows(raw),
+            hIdx = List.PositionOf(
+                       List.Transform(rows, (r) => List.Contains(List.Transform(r, Norm), ColDrug)), true),
+            body = if hIdx < 0 then null
+                   else Table.TransformColumnNames(
+                            Table.PromoteHeaders(Table.Skip(raw, hIdx), [PromoteAllScalars = true]), Norm),
+            pick = (tbl as table, col as text) as list =>
+                       if col <> "" and List.Contains(Table.ColumnNames(tbl), col)
+                       then Table.Column(tbl, col) else List.Repeat({null}, Table.RowCount(tbl)),
+            // 略称：見出し「略称」→「略称」を含む見出し→ B列（ほかの列に使っていなければ）
+            abbr = (tbl as table) as list =>
+                       let
+                           names  = Table.ColumnNames(tbl),
+                           byName = if ColAbbr <> "" and List.Contains(names, ColAbbr) then ColAbbr
+                                    else List.First(List.Select(names, (n) => Text.Contains(n, "略称")), null),
+                           byPos  = if List.Count(names) >= 2
+                                       and not List.Contains({ColCat, ColDrug, ColPat, ColQty, ColStock, ColIncl}, names{1})
+                                    then names{1} else null,
+                           col    = if byName <> null then byName else byPos
+                       in
+                           if col = null then List.Repeat({null}, Table.RowCount(tbl)) else Table.Column(tbl, col),
+            ren  = if body = null then null
+                   else Table.FromColumns(
+                            {pick(body, ColCat), abbr(body), pick(body, ColDrug), pick(body, ColPat),
+                             pick(body, ColQty), pick(body, ColStock), pick(body, ColIncl)},
+                            {"薬品区分", "略称", "薬品名", "患者数", "数量", "在庫量", "在庫量_発注残込み"}),
+            withMeta = if ren = null then null
+                   else Table.AddColumn(Table.AddColumn(Table.AddColumn(ren,
+                            "日付", (x) => d, type date),
+                            "ファイル名", (x) => f, type text),
+                            "シート名", (x) => s, type text)
+        in
+            if withMeta = null then Empty else withMeta),
+
+    結合 = if Table.IsEmpty(整形) then Empty else Table.Combine(整形[表]),
+
+    // 数値：全角数字・桁区切り・単位を除いて数値にする
+    Num = (val as any) as nullable number =>
+        if val = null then null
+        else if val is number then val
+        else
+            let
+                txt     = Nz(Text.From(val)),
+                cleaned = Text.Remove(txt, {" ", "#(lf)", "#(cr)", "#(tab)", ",", "個", "人", "つ", "錠", "g", "mL", "cap"})
+            in  try Number.FromText(cleaned, "en-US") otherwise null,
+
+    型変換 = Table.TransformColumns(結合, {
+                 {"薬品区分", each if _ = null then null else Nz(_), type nullable text},
+                 {"略称",     each if _ = null then null else Text.Trim(Text.From(_)), type nullable text},
+                 {"薬品名",   each if _ = null then null else Nz(_), type nullable text},
+                 {"患者数",   Num, type nullable number},
+                 {"数量",     Num, type nullable number},
+                 {"在庫量",   Num, type nullable number},
+                 {"在庫量_発注残込み", Num, type nullable number}}),
+
+    // 空の薬品名・合計行・見出しの繰り返しを除き、使用量（または患者数）がある行だけ残す
+    有効行 = Table.SelectRows(型変換, each
+                 [薬品名] <> null and [薬品名] <> ""
+                 and not List.Contains({"合計", "総合計", "小計", ColDrug}, Norm([薬品名]))
+                 and (KeepZero or ([数量] <> null and [数量] > 0) or ([患者数] <> null and [患者数] > 0))),
+
+    結果 = Table.SelectColumns(有効行, {"日付", "薬品区分", "略称", "薬品名", "患者数", "数量", "在庫量",
+                                         "在庫量_発注残込み", "ファイル名", "シート名"})
+in
+    結果
+
+
+// ================================================================================
+// ③ クエリ名：日次データ
+//    実績フォルダから、設定の開始日～終了日の日別データを読む
+// ================================================================================
+let
+    Prm    = #"設定値",
+    Result = #"fx_使用量読込"(
+                 Text.From(Prm[フォルダパス]),
+                 Prm[先頭],
+                 Date.From(Prm[開始日]),
+                 Date.From(Prm[終了日]),
+                 Prm[列名_実績])
+in
+    Result
+
+
+// ================================================================================
+// ④ クエリ名：fx_卸の休み（関数）
+//    firstDay～lastDay の各日について、卸の営業日かどうかと休みの理由を返す
+//    休み：土曜・日曜／国民の祝日・振替休日・国民の休日（計算で自動判定）／
+//          年末年始（設定の「年末年始の休み始め」～「年末年始の休み終わり」）／
+//          追加休業日テーブルに書いた日（お盆・卸の都合など）
+//    ※ 春分の日・秋分の日は天文の近似式（1980～2099年で有効）
+//    ⑧ M_日付 で使う（PowerQuery_ABC では ⑰ 納品カレンダー で使う。両方で同じコード）
+// ================================================================================
+(firstDay as date, lastDay as date) as table =>
+let
+    Prm       = #"設定値",
+    FirstDay  = firstDay,
+    LastDay   = lastDay,
+    Years     = {Date.Year(FirstDay) .. Date.Year(LastDay)},
+
+    // 「12/29」のような文字、または日付のセルから {月, 日} を取り出す
+    MonthDay = (v as any, dflt as text) as list =>
+        let
+            x = if v = null or (v is text and Text.Trim(v) = "") then dflt else v,
+            p = if x is date or x is datetime then null
+                else Text.Split(Text.Replace(Text.Trim(Text.From(x)), "-", "/"), "/")
+        in
+            if p = null then {Date.Month(Date.From(x)), Date.Day(Date.From(x))}
+            else {Number.From(p{List.Count(p) - 2}), Number.From(List.Last(p))},
+    YeStart = MonthDay(Record.FieldOrDefault(Prm, "年末年始の休み始め", null), "12/29"),
+    YeEnd   = MonthDay(Record.FieldOrDefault(Prm, "年末年始の休み終わり", null), "1/3"),
+
+    // その年の国民の祝日（振替休日・国民の休日を除く）
+    Holidays = (y as number) as list =>
+        let
+            NthMonday = (m as number, n as number) as date =>
+                let f = #date(y, m, 1)
+                in  Date.AddDays(f, Number.Mod(7 - Date.DayOfWeek(f, Day.Monday), 7) + 7 * (n - 1)),
+            k    = y - 1980,
+            Shun = Number.RoundDown(20.8431 + 0.242194 * k - Number.RoundDown(k / 4)),
+            Shu  = Number.RoundDown(23.2488 + 0.242194 * k - Number.RoundDown(k / 4))
+        in
+            {
+                [日付 = #date(y, 1, 1),   名前 = "元日"],
+                [日付 = NthMonday(1, 2),  名前 = "成人の日"],
+                [日付 = #date(y, 2, 11),  名前 = "建国記念の日"],
+                [日付 = #date(y, 2, 23),  名前 = "天皇誕生日"],
+                [日付 = #date(y, 3, Shun), 名前 = "春分の日"],
+                [日付 = #date(y, 4, 29),  名前 = "昭和の日"],
+                [日付 = #date(y, 5, 3),   名前 = "憲法記念日"],
+                [日付 = #date(y, 5, 4),   名前 = "みどりの日"],
+                [日付 = #date(y, 5, 5),   名前 = "こどもの日"],
+                [日付 = NthMonday(7, 3),  名前 = "海の日"],
+                [日付 = #date(y, 8, 11),  名前 = "山の日"],
+                [日付 = NthMonday(9, 3),  名前 = "敬老の日"],
+                [日付 = #date(y, 9, Shu), 名前 = "秋分の日"],
+                [日付 = NthMonday(10, 2), 名前 = "スポーツの日"],
+                [日付 = #date(y, 11, 3),  名前 = "文化の日"],
+                [日付 = #date(y, 11, 23), 名前 = "勤労感謝の日"]
+            },
+
+    Base      = List.Combine(List.Transform(Years, Holidays)),
+    BaseDates = List.Buffer(List.Transform(Base, each [日付])),
+    // 振替休日：祝日が日曜なら、その後の最初の祝日でない日
+    Subst     = List.Transform(
+                    List.Select(Base, each Date.DayOfWeek([日付], Day.Monday) = 6),
+                    (h) => [日付 = List.First(List.Select(
+                                       List.Transform({1 .. 7}, (i) => Date.AddDays(h[日付], i)),
+                                       (d) => not List.Contains(BaseDates, d))),
+                            名前 = "振替休日"]),
+    AllDates  = List.Dates(FirstDay, Duration.Days(LastDay - FirstDay) + 1, #duration(1, 0, 0, 0)),
+    // 国民の休日：前日と翌日が祝日の日
+    Kokumin   = List.Transform(
+                    List.Select(AllDates, (d) => not List.Contains(BaseDates, d)
+                                and List.Contains(BaseDates, Date.AddDays(d, -1))
+                                and List.Contains(BaseDates, Date.AddDays(d, 1))),
+                    (d) => [日付 = d, 名前 = "国民の休日"]),
+    HolTbl    = Table.Buffer(Table.Distinct(Table.FromRecords(Base & Subst & Kokumin), {"日付"})),
+
+    // 追加休業日テーブル（任意）：列「日付」「理由」
+    ExtraRaw  = try Table.SelectColumns(Excel.CurrentWorkbook(){[Name = "追加休業日"]}[Content],
+                        {"日付", "理由"}, MissingField.UseNull)
+                otherwise #table({"日付", "理由"}, {}),
+    Extra     = Table.Buffer(Table.SelectRows(Table.TransformColumns(ExtraRaw, {
+                    {"日付", each try Date.From(_) otherwise null, type nullable date},
+                    {"理由", each if _ = null or Text.Trim(Text.From(_)) = "" then "追加休業日" else Text.From(_), type text}}),
+                    each [日付] <> null)),
+
+    IsYearEnd = (d as date) as logical =>
+        let
+            md = Date.Month(d) * 100 + Date.Day(d),
+            s  = YeStart{0} * 100 + YeStart{1},
+            e  = YeEnd{0} * 100 + YeEnd{1}
+        in
+            if s <= e then md >= s and md <= e else md >= s or md <= e,
+
+    Rows = List.Transform(AllDates, (d) =>
+        let
+            dow = Date.DayOfWeek(d, Day.Monday),
+            hol = Table.SelectRows(HolTbl, each [日付] = d),
+            ext = Table.SelectRows(Extra, each [日付] = d),
+            why = if not Table.IsEmpty(ext) then ext{0}[理由]
+                  else if not Table.IsEmpty(hol) then hol{0}[名前]
+                  else if IsYearEnd(d) then "年末年始"
+                  else if dow = 5 then "土曜"
+                  else if dow = 6 then "日曜"
+                  else null
+        in
+            [日付 = d, 曜日 = Text.Start(Date.DayOfWeekName(d, "ja-JP"), 1),
+             卸の営業日 = why = null, 休みの理由 = why]),
+
+    Result = Table.TransformColumnTypes(Table.FromRecords(Rows), {
+                 {"日付", type date}, {"曜日", type text}, {"卸の営業日", type logical}, {"休みの理由", type text}})
+in
+    Result
+
+
+// ================================================================================
+// ⑤ クエリ名：出納（接続のみ）
+//    出納フォルダの月次の出納（yyyymmdd_yyyymmdd_数量一覧.xls）を全期間まとめて読む
+//    ・期間：ファイル名の 8桁の数字2つ（始め・終わり）。同じ期間は更新日時が新しいファイルだけ
+//    ・列（固定）：製剤コード／製剤／コード／品名／繰越数量／仕入数量／払出数量／在庫数量／単位／棚番
+//    ・出納に載るのは、その月に何かしら動いた薬だけ（動きのない薬は載らない）
+//    ・その他の増減 ＝ 在庫数量 －（繰越数量 ＋ 仕入数量 － 払出数量）
+//        マイナス：返品・廃棄・店舗間移動・譲渡など　プラス：移動の受け入れ・棚卸の調整など
+//    ・品名の先頭空白：品名の前の空白の数（意味は未確認のため残しておく）
+// ================================================================================
+let
+    Prm  = #"設定値",
+    Nz   = #"fx_正規化",
+
+    // ---- フォルダ（設定「出納フォルダパス」）とファイル名の目印（① で固定「数量一覧」） ----
+    FolderPath = if Prm[出納フォルダパス] = null then error "設定テーブルの「出納フォルダパス」が空欄です"
+                 else Prm[出納フォルダパス],
+    Mark       = Prm[出納の目印],
+
+    // 列名の照合：表記をそろえ、空白・改行を除き、かっこを全角にそろえる
+    Norm = (t as any) as text =>
+        let s = if t = null then "" else Nz(Text.From(t))
+        in  Text.Replace(Text.Replace(Text.Remove(s, {" ", "　", "#(lf)", "#(cr)", "#(tab)"}), "(", "（"), ")", "）"),
+
+    Cols = {"製剤コード", "製剤", "コード", "品名", "繰越数量", "仕入数量", "払出数量", "在庫数量", "単位", "棚番"},
+    OutType = type table [期間開始 = date, 期間終了 = date, 日数 = Int64.Type,
+                          製剤コード = nullable text, 製剤 = nullable text, コード = nullable text,
+                          品名 = text, 品名の先頭空白 = Int64.Type,
+                          繰越数量 = nullable number, 仕入数量 = nullable number, 払出数量 = nullable number,
+                          在庫数量 = nullable number, その他の増減 = nullable number,
+                          単位 = nullable text, 棚番 = nullable text, ファイル名 = text],
+
+    // ---- ファイル名の 8桁の数字2つ → 期間 ----
+    ToDate = (x as text) as nullable date =>
+        try #date(Number.FromText(Text.Start(x, 4)), Number.FromText(Text.Middle(x, 4, 2)), Number.FromText(Text.End(x, 2)))
+        otherwise null,
+    Period = (nm as text) as nullable record =>
+        let
+            parts = Text.SplitAny(Nz(nm), "_-. （）()"),
+            ds    = List.Select(parts, (p) => Text.Length(p) = 8 and Text.Select(p, {"0" .. "9"}) = p),
+            a     = if List.Count(ds) >= 2 then ToDate(ds{0}) else null,
+            b     = if List.Count(ds) >= 2 then ToDate(ds{1}) else null
+        in
+            if a = null or b = null or b < a then null else [開始 = a, 終了 = b],
+
+    Files  = Table.SelectRows(Folder.Files(FolderPath), each
+                 Text.StartsWith(Text.Lower([Extension]), ".xls") and not Text.StartsWith([Name], "~$")
+                 and Text.Contains(Nz([Name]), Mark)),
+    WithP  = Table.AddColumn(Files, "期間", each Period([Name])),
+    Valid  = Table.SelectRows(WithP, each [期間] <> null),
+    Keyed  = Table.AddColumn(Valid, "期間キー", each
+                 Date.ToText([期間][開始], "yyyyMMdd") & "-" & Date.ToText([期間][終了], "yyyyMMdd"), type text),
+    // 同じ期間のファイルは、更新日時が新しい1つだけ
+    Latest = Table.Group(Keyed, {"期間キー"}, {{"f", each Table.First(Table.Sort(_, {{"Date modified", Order.Descending}}))}}),
+
+    // ---- 1ファイルを読む ----
+    ReadOne = (f as record) as table =>
+        let
+            wb     = Excel.Workbook(f[Content], null, true),
+            sheets = if Table.HasColumns(wb, "Kind") then Table.SelectRows(wb, each [Kind] = "Sheet")
+                     else Table.SelectRows(wb, each
+                              let n = Text.TrimEnd(Text.Remove(Text.From([Name]), {"'"}), "$")
+                              in  not Text.Contains(n, "$") and not Text.Contains(n, "Print_") and not Text.Contains(n, "_xlnm")),
+            raw    = sheets{0}[Data],
+            rows   = Table.ToRows(raw),
+            hIdx   = List.PositionOf(List.Transform(rows, (r) => List.Contains(List.Transform(r, Norm), "品名")), true),
+            body   = Table.TransformColumnNames(
+                         Table.PromoteHeaders(Table.Skip(raw, List.Max({hIdx, 0})), [PromoteAllScalars = true]), Norm),
+            names  = Table.ColumnNames(body),
+            pick   = (c as text) as list =>
+                         if List.Contains(names, c) then Table.Column(body, c) else List.Repeat({null}, Table.RowCount(body)),
+            t      = Table.FromColumns(List.Transform(Cols, pick), Cols),
+            p      = f[期間],
+            fname  = f[Name]
+        in
+            Table.AddColumn(Table.AddColumn(Table.AddColumn(t,
+                "期間開始", (x) => p[開始], type date),
+                "期間終了", (x) => p[終了], type date),
+                "ファイル名", (x) => fname, type text),
+
+    Combined = if Table.IsEmpty(Latest) then #table(Cols & {"期間開始", "期間終了", "ファイル名"}, {})
+               else Table.Combine(List.Transform(Latest[f], ReadOne)),
+
+    // ---- 型と表記 ----
+    Num = (val as any) as nullable number =>
+        if val = null then null
+        else if val is number then val
+        else let txt = Text.Remove(Nz(Text.From(val)), {" ", ","})
+             in  if txt = "" then null else try Number.FromText(txt, "en-US") otherwise null,
+    Txt = (val as any) as nullable text =>
+        if val = null then null else let s = Text.Trim(Text.From(val)) in if s = "" then null else s,
+    Lead = (val as any) as number =>
+        if val = null then 0
+        else let s = Text.From(val) in Text.Length(s) - Text.Length(Text.TrimStart(s, {" ", "　"})),
+
+    WithLead = Table.AddColumn(Combined, "品名の先頭空白", each Lead([品名]), Int64.Type),
+    Typed = Table.TransformColumns(WithLead, {
+                {"製剤コード", Txt, type nullable text},
+                {"製剤",       each if _ = null then null else Nz(_), type nullable text},
+                {"コード",     Txt, type nullable text},
+                {"品名",       each if _ = null then null else Nz(_), type nullable text},
+                {"繰越数量",   Num, type nullable number},
+                {"仕入数量",   Num, type nullable number},
+                {"払出数量",   Num, type nullable number},
+                {"在庫数量",   Num, type nullable number},
+                {"単位",       each if _ = null then null else Nz(_), type nullable text},
+                {"棚番",       Txt, type nullable text}}),
+    Rows = Table.SelectRows(Typed, each [品名] <> null and [品名] <> ""
+                 and not List.Contains({"合計", "総合計", "小計", "品名"}, Norm([品名]))),
+
+    // その他の増減 ＝ 在庫 －（繰越 ＋ 仕入 － 払出）。小数の誤差は 0.001 単位で丸める
+    Diff = Table.AddColumn(Rows, "その他の増減", each
+               if [在庫数量] = null then null
+               else Number.Round([在庫数量] - (([繰越数量] ?? 0) + ([仕入数量] ?? 0) - ([払出数量] ?? 0)), 3),
+               type nullable number),
+    Days = Table.AddColumn(Diff, "日数", each Duration.Days([期間終了] - [期間開始]) + 1, Int64.Type),
+
+    Ordered = Table.SelectColumns(Days, {"期間開始", "期間終了", "日数", "製剤コード", "製剤", "コード", "品名",
+                  "品名の先頭空白", "繰越数量", "仕入数量", "払出数量", "在庫数量", "その他の増減", "単位", "棚番", "ファイル名"}),
+    Result  = Value.ReplaceType(Ordered, OutType)
+in
+    Result
+
+
+// ================================================================================
+// ⑥ クエリ名：T_日次（データモデルに読み込む）
+//    薬品使用量分析データ（実績フォルダ・③ 日次データ）を、日付×薬品の1行にまとめる
+//    ・予定数量：次回来局予定から作られた数量（定期の予定。臨時・新患・飛び処方は入らない）
+//    ・予定患者数：その日にその薬が予定されていた患者の数（定期分の頻度）
+//    ・在庫量：その日のシートの在庫数量（発注残を含まない）
+// ================================================================================
+let
+    Src = #"日次データ",
+    Grouped = Table.Group(Src, {"日付", "薬品名"}, {
+        {"予定数量",   each List.Sum([数量]), type nullable number},
+        {"予定患者数", each List.Sum([患者数]), type nullable number},
+        {"在庫量",     each List.Max([在庫量]), type nullable number}}),
+    Result = Table.Sort(Grouped, {{"日付", Order.Ascending}, {"薬品名", Order.Ascending}})
+in
+    Result
+
+
+// ================================================================================
+// ⑦ クエリ名：T_月次（データモデルに読み込む）
+//    月×薬品の1行に、出納（実際）と分析データ（予定）を並べる
+//    ・月：その月の1日（出納は暦の月単位で出力する前提）
+//    ・出納に載った：その月の出納にその薬の行がある（＝何かしら動いた）
+//      出納のある月に載っていない薬は、仕入・払出・その他の増減を 0 とする（在庫は空欄）
+//    ・予定データあり：設定の開始日～終了日（③ で読む期間）が、その月をまるごと含む
+//    ・予定とのずれ ＝ 払出数量 － 予定数量（出納と予定の両方がある月だけ）
+//        プラス：臨時処方・新患・他科・飛び処方・再来局・増量
+//        マイナス：処方の終了・残薬調整で出ない・来局なし・処方日数の変更
+//        ※ 月の合計どうしなので、同じ月の中のプラスとマイナスは打ち消し合う
+//    ・入庫の概算 ＝ 仕入数量 ＋ その他の増減のプラス分
+// ================================================================================
+let
+    Prm  = #"設定値",
+    S0   = Date.From(Prm[開始日]),
+    E0   = Date.From(Prm[終了日]),
+    Sui  = #"出納",
+    Day  = #"T_日次",
+
+    // ---- 出納：月×品名 ----
+    SuiM = Table.Group(Table.AddColumn(Sui, "月", each Date.StartOfMonth([期間開始]), type date), {"月", "品名"}, {
+        {"繰越数量",     each List.Sum([繰越数量]), type nullable number},
+        {"仕入数量",     each List.Sum([仕入数量]), type nullable number},
+        {"払出数量",     each List.Sum([払出数量]), type nullable number},
+        {"その他の増減", each List.Sum([その他の増減]), type nullable number},
+        {"在庫数量",     each List.Last([在庫数量]), type nullable number}}),
+    SuiMonths = List.Buffer(List.Distinct(SuiM[月])),
+
+    // ---- 予定：月×薬品名 ----
+    DayM = Table.Group(Table.AddColumn(Day, "月", each Date.StartOfMonth([日付]), type date), {"月", "薬品名"}, {
+        {"予定数量",   each List.Sum([予定数量]), type nullable number},
+        {"予定患者数", each List.Sum([予定患者数]), type nullable number},
+        {"予定日数",   each List.Count(List.Select([予定数量], (q) => q <> null and q > 0)), Int64.Type}}),
+
+    J  = Table.NestedJoin(SuiM, {"月", "品名"}, DayM, {"月", "薬品名"}, "x", JoinKind.FullOuter),
+    E  = Table.ExpandTableColumn(J, "x", {"月", "薬品名", "予定数量", "予定患者数", "予定日数"},
+             {"月_予定", "薬品名_予定", "予定数量", "予定患者数", "予定日数"}),
+    K  = Table.AddColumn(E, "計算", each
+        let
+            m       = [月] ?? [月_予定],
+            onSui   = [品名] <> null,
+            suiMon  = List.Contains(SuiMonths, m),
+            planMon = m >= S0 and Date.EndOfMonth(m) <= E0,
+            zeroIf  = (v) => if v = null and suiMon then 0 else v,
+            out     = zeroIf([払出数量]),
+            plan    = if planMon then [予定数量] ?? 0 else null,
+            gap     = if suiMon and planMon then Number.Round(out - plan, 3) else null,
+            other   = zeroIf([その他の増減])
+        in
+            [月 = m, 薬品名 = [品名] ?? [薬品名_予定],
+             出納に載った = onSui, 出納データあり = suiMon, 予定データあり = planMon,
+             繰越数量 = [繰越数量], 仕入数量 = zeroIf([仕入数量]), 払出数量 = out,
+             その他の増減 = other, 在庫数量 = [在庫数量],
+             入庫の概算 = if suiMon then (zeroIf([仕入数量]) ?? 0) + List.Max({0, other ?? 0}) else null,
+             予定数量 = plan, 予定患者数 = if planMon then [予定患者数] ?? 0 else null,
+             予定日数 = if planMon then [予定日数] ?? 0 else null,
+             予定とのずれ = gap,
+             ずれの割合 = if gap <> null and plan > 0 then gap / plan else null]),
+    Rows   = Table.FromRecords(K[計算], type table [
+                 月 = date, 薬品名 = text, 出納に載った = logical, 出納データあり = logical, 予定データあり = logical,
+                 繰越数量 = nullable number, 仕入数量 = nullable number, 払出数量 = nullable number,
+                 その他の増減 = nullable number, 在庫数量 = nullable number, 入庫の概算 = nullable number,
+                 予定数量 = nullable number, 予定患者数 = nullable number, 予定日数 = nullable number,
+                 予定とのずれ = nullable number, ずれの割合 = nullable number]),
+    Typed  = Table.TransformColumnTypes(Rows, {{"予定日数", Int64.Type}, {"ずれの割合", Percentage.Type}}),
+    Result = Table.Sort(Typed, {{"月", Order.Ascending}, {"薬品名", Order.Ascending}})
+in
+    Result
+
+
+// ================================================================================
+// ⑧ クエリ名：M_日付（データモデルに読み込む）
+//    日付の表。T_日次[日付] と T_月次[月] をここにつなぐ
+//    ・範囲：実績（設定の開始日～終了日）と出納の期間をすべて含む月の、1日～末日
+//    ・処方のあった日：T_日次 にその日のデータがある（薬局が開いていた日の目安）
+//    ・卸の営業日・休みの理由：④ fx_卸の休み と同じ判定
+// ================================================================================
+let
+    Prm   = #"設定値",
+    Days  = List.Buffer(List.Distinct(#"T_日次"[日付])),
+    Mons  = #"T_月次"[月],
+    Lo    = Date.StartOfMonth(List.Min(List.RemoveNulls({Date.From(Prm[開始日]), List.Min(Mons)}))),
+    Hi    = Date.EndOfMonth(List.Max(List.RemoveNulls({Date.From(Prm[終了日]), List.Max(Mons)}))),
+    Cal   = #"fx_卸の休み"(Lo, Hi),
+    Add   = Table.AddColumn(Cal, "列", each
+        let d = [日付], m = Date.Month(d), q = Date.QuarterOfYear(d)
+        in  [年 = Date.Year(d), 月 = m,
+             年月 = Date.ToText(d, "yyyy-MM"),
+             月初 = Date.StartOfMonth(d),
+             期 = {"1-3月", "4-6月", "7-9月", "10-12月"}{q - 1},
+             曜日番号 = Date.DayOfWeek(d, Day.Monday) + 1,
+             処方のあった日 = List.Contains(Days, d)]),
+    Exp   = Table.ExpandRecordColumn(Add, "列", {"年", "月", "年月", "月初", "期", "曜日番号", "処方のあった日"}),
+    Result = Table.TransformColumnTypes(
+                 Table.SelectColumns(Exp, {"日付", "年", "月", "年月", "月初", "期", "曜日", "曜日番号",
+                                           "処方のあった日", "卸の営業日", "休みの理由"}),
+                 {{"年", Int64.Type}, {"月", Int64.Type}, {"年月", type text}, {"月初", type date},
+                  {"期", type text}, {"曜日番号", Int64.Type}, {"処方のあった日", type logical}})
+in
+    Result
+
+
+// ================================================================================
+// ⑨ クエリ名：M_薬品（データモデルに読み込む）
+//    薬品ごとの1行。属性（略称・単位・棚番・経過措置・発注除外・グループ）と、在庫の必要性を判断する指標
+//    T_日次・T_月次・T_判定理由 の [薬品名] をここにつなぐ
+//
+//    【予定の指標】T_日次（設定の開始日～終了日）から
+//      予定日数       ：その薬の予定があった日数
+//      平均間隔       ：処方のあった日数 ÷ 予定日数（1 なら毎日、10 なら10日に1回）
+//      ばらつき（CV²）：予定があった日の数量の（標準偏差 ÷ 平均）の2乗
+//      需要の型       ：平均間隔 1.32、ばらつき 0.49 を境に4つに分ける（Syntetos–Boylan）
+//                        安定／ばらつき大／間欠／まばら・大口
+//      1日平均予定    ：予定数量の合計 ÷ 処方のあった日数
+//    【出納の指標】T_月次（出納のある月）から
+//      動いた月数     ：出納に載った月の数（出納の月数のうち）
+//      1日平均払出    ：払出の合計 ÷ 出納の月の暦日数
+//      最終在庫       ：最後に出納に載った月の在庫数量（そのあと動いていなければ今も同じ）
+//      動きのない月数 ：最後に載った月から、一番新しい出納の月までの月数
+//      在庫日数       ：最終在庫 ÷ 1日平均払出（今の在庫で何日もつか）
+//      1箱消化日数    ：包装単位 ÷ 1日平均払出（包装単位は在庫情報、なければ設定の標準の包装単位）
+//      その他の減少   ：その他の増減のマイナス分の合計（返品・廃棄・移動など）
+//    【予定とのずれ】出納と予定の両方がある月から
+//      ずれの割合     ：（払出 － 予定）の合計 ÷ 予定の合計
+//      ずれの大きさ   ：月ごとの |払出 － 予定| の合計 ÷ 予定の合計（打ち消し合いを除いた大きさ）
+//      予定外の月数   ：予定が0なのに払出があった月の数（臨時・新患・他科だけで出た月）
+// ================================================================================
+let
+    Prm  = #"設定値",
+    Num  = (key as text, dflt as number) as number =>
+               let v = Record.FieldOrDefault(Prm, key, null)
+               in  if v = null or (v is text and Text.Trim(v) = "") then dflt else Number.From(v),
+    StdPack = Num("標準の包装単位", 100),
+
+    Day  = Table.Buffer(#"T_日次"),
+    Mon  = Table.Buffer(#"T_月次"),
+    Sui  = #"出納",
+
+    Clean = (v as any) as nullable text => if v = null then null else let t = Text.Trim(Text.From(v)) in if t = "" then null else t,
+    Hand  = (name as text, cols as list) as table =>
+                try Table.SelectColumns(Excel.CurrentWorkbook(){[Name = name]}[Content], cols, MissingField.UseNull)
+                otherwise #table(cols, {}),
+
+    // ---- 対象の薬：予定（T_日次）か出納（T_月次）に一度でも出てきた薬 ----
+    Names = List.Distinct(List.RemoveNulls(Day[薬品名] & Mon[薬品名])),
+    Base  = Table.FromColumns({Names}, type table [薬品名 = text]),
+
+    // ---- 属性：略称・製剤（実績で一番新しい日付のもの） ----
+    AbbrSrc = Table.SelectRows(Table.SelectColumns(#"日次データ", {"日付", "薬品名", "略称", "薬品区分"}),
+                  each [略称] <> null or [薬品区分] <> null),
+    Abbr    = Table.Group(AbbrSrc, {"薬品名"}, {
+                  {"略称", each Clean(List.Last(List.RemoveNulls(Table.Sort(_, {{"日付", Order.Ascending}})[略称]))), type nullable text},
+                  {"製剤_予定", each List.Last(List.RemoveNulls([薬品区分])), type nullable text}}),
+
+    // ---- 属性：出納の最新の行（製剤・単位・棚番・コード） ----
+    SuiLast = Table.Group(Sui, {"品名"}, {{"r", each Table.Max(_, "期間終了"), type record}}),
+    SuiAttr = Table.ExpandRecordColumn(SuiLast, "r", {"製剤", "単位", "棚番", "コード", "品名の先頭空白"}),
+
+    // ---- 属性：手入力テーブル（経過措置リスト・在庫情報・発注除外・薬品グループ） ----
+    Trans = Table.Distinct(Table.SelectRows(Table.TransformColumns(Hand("経過措置リスト", {"薬品名", "経過措置期限"}), {
+                {"薬品名", Clean, type nullable text},
+                {"経過措置期限", each try Date.From(_) otherwise null, type nullable date}}),
+                each [薬品名] <> null), {"薬品名"}),
+    Stock = Table.Distinct(Table.TransformColumns(Hand("在庫情報", {"薬品名", "包装単位", "列数"}), {
+                {"薬品名", Clean, type nullable text},
+                {"包装単位", each try Number.From(_) otherwise null, type nullable number},
+                {"列数", each try Number.From(_) otherwise null, type nullable number}}), {"薬品名"}),
+    Excl  = List.Buffer(List.RemoveNulls(List.Transform(Hand("発注除外", {"薬品名"})[薬品名], Clean))),
+    Grp   = Table.Distinct(Table.TransformColumns(Hand("薬品グループ", {"薬品名", "成分規格", "需要のまとまり", "先発後発"}), {
+                {"薬品名", Clean, type nullable text}, {"成分規格", Clean, type nullable text},
+                {"需要のまとまり", Clean, type nullable text}, {"先発後発", Clean, type nullable text}}), {"薬品名"}),
+
+    // ---- 予定の指標 ----
+    DayN  = List.Count(List.Distinct(Day[日付])),
+    DayG  = Table.Group(Day, {"薬品名"}, {{"m", each
+        let
+            q    = List.Select([予定数量], (x) => x <> null and x > 0),
+            n    = List.Count(q),
+            tot  = List.Sum(q),
+            mean = if n > 0 then tot / n else null,
+            sd   = if n >= 2 then List.StandardDeviation(q) else null,
+            cv2  = if sd <> null and mean > 0 then Number.Power(sd / mean, 2) else null,
+            adi  = if n > 0 then DayN / n else null
+        in
+            [予定日数 = n, 予定数量合計 = tot, 予定患者数合計 = List.Sum([予定患者数]),
+             最終予定日 = List.Max(Table.SelectRows(_, each [予定数量] <> null and [予定数量] > 0)[日付]),
+             平均間隔 = adi, #"ばらつき（CV²）" = cv2,
+             需要の型 = if adi = null then null
+                        else if cv2 = null then (if adi < 1.32 then "安定" else "間欠")
+                        else if adi < 1.32 then (if cv2 < 0.49 then "安定" else "ばらつき大")
+                        else (if cv2 < 0.49 then "間欠" else "まばら・大口"),
+             #"1日平均予定" = if DayN > 0 and tot <> null then tot / DayN else null], type record}}),
+
+    // ---- 出納の指標 ----
+    SuiMon   = Table.SelectRows(Mon, each [出納データあり]),
+    SuiMonths = List.Buffer(List.Distinct(SuiMon[月])),
+    MonN     = List.Count(SuiMonths),
+    CalDays  = List.Sum(List.Transform(SuiMonths, (m) => Date.Day(Date.EndOfMonth(m)))),
+    LatestM  = List.Max(SuiMonths),
+    MonG = Table.Group(SuiMon, {"薬品名"}, {{"m", each
+        let
+            moved   = Table.SelectRows(_, each [出納に載った]),
+            lastRow = if Table.IsEmpty(moved) then null else Table.Max(moved, "月"),
+            out     = List.Sum([払出数量]) ?? 0,
+            perDay  = if CalDays > 0 then out / CalDays else null,
+            lastM   = if lastRow = null then null else lastRow[月],
+            stock   = if lastRow = null then null else lastRow[在庫数量],
+            both    = Table.SelectRows(_, each [予定とのずれ] <> null),
+            planSum = List.Sum(both[予定数量]) ?? 0,
+            gapSum  = List.Sum(both[予定とのずれ]),
+            absSum  = List.Sum(List.Transform(both[予定とのずれ], Number.Abs))
+        in
+            [動いた月数 = Table.RowCount(moved), 払出合計 = out,
+             払出のあった月数 = List.Count(List.Select([払出数量], (x) => x <> null and x > 0)),
+             月平均払出 = if MonN > 0 then out / MonN else null,
+             #"1日平均払出" = perDay,
+             仕入合計 = List.Sum([仕入数量]), 入庫の概算合計 = List.Sum([入庫の概算]),
+             その他の減少 = List.Sum(List.Transform([その他の増減], (x) => if x <> null and x < 0 then -x else 0)),
+             最後に動いた月 = lastM, 最終在庫 = stock,
+             動きのない月数 = if lastM = null then null
+                              else (Date.Year(LatestM) - Date.Year(lastM)) * 12 + Date.Month(LatestM) - Date.Month(lastM),
+             在庫日数 = if stock <> null and perDay <> null and perDay > 0 then stock / perDay else null,
+             比較月数 = Table.RowCount(both),
+             ずれの割合 = if planSum > 0 then gapSum / planSum else null,
+             ずれの大きさ = if planSum > 0 then absSum / planSum else null,
+             予定外の月数 = Table.RowCount(Table.SelectRows(both, each ([予定数量] ?? 0) = 0 and ([払出数量] ?? 0) > 0))],
+        type record}}),
+
+    // ---- つなぐ ----
+    J1 = Table.ExpandTableColumn(Table.NestedJoin(Base, {"薬品名"}, Abbr, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"略称", "製剤_予定"}),
+    J2 = Table.ExpandTableColumn(Table.NestedJoin(J1, {"薬品名"}, SuiAttr, {"品名"}, "x", JoinKind.LeftOuter), "x",
+             {"製剤", "単位", "棚番", "コード", "品名の先頭空白"}),
+    J3 = Table.ExpandTableColumn(Table.NestedJoin(J2, {"薬品名"}, Trans, {"薬品名"}, "x", JoinKind.LeftOuter), "x",
+             {"経過措置期限"}),
+    J4 = Table.ExpandTableColumn(Table.NestedJoin(J3, {"薬品名"}, Stock, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"包装単位", "列数"}),
+    J5 = Table.ExpandTableColumn(Table.NestedJoin(J4, {"薬品名"}, Grp, {"薬品名"}, "x", JoinKind.LeftOuter), "x",
+             {"成分規格", "需要のまとまり", "先発後発"}),
+    J6 = Table.ExpandTableColumn(Table.NestedJoin(J5, {"薬品名"}, DayG, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"m"}, {"予定"}),
+    J7 = Table.ExpandTableColumn(Table.NestedJoin(J6, {"薬品名"}, MonG, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"m"}, {"出納"}),
+
+    PlanCols = {"予定日数", "予定数量合計", "予定患者数合計", "最終予定日", "平均間隔", "ばらつき（CV²）", "需要の型", "1日平均予定"},
+    SuiCols  = {"動いた月数", "払出合計", "払出のあった月数", "月平均払出", "1日平均払出", "仕入合計", "入庫の概算合計",
+                "その他の減少", "最後に動いた月", "最終在庫", "動きのない月数", "在庫日数",
+                "比較月数", "ずれの割合", "ずれの大きさ", "予定外の月数"},
+    E1 = Table.ExpandRecordColumn(Table.TransformColumns(J7, {{"予定", each _ ?? Record.FromList(List.Repeat({null}, List.Count(PlanCols)), PlanCols)}}), "予定", PlanCols),
+    E2 = Table.ExpandRecordColumn(Table.TransformColumns(E1, {{"出納", each _ ?? Record.FromList(List.Repeat({null}, List.Count(SuiCols)), SuiCols)}}), "出納", SuiCols),
+
+    Fin = Table.AddColumn(E2, "f", each
+        let
+            pack = if [包装単位] = null or [包装単位] <= 0 then StdPack else [包装単位],
+            perDay = [#"1日平均払出"]
+        in
+            [製剤_表示 = [製剤] ?? [製剤_予定],
+             経過措置 = List.Contains(Trans[薬品名], [薬品名]),
+             発注除外 = List.Contains(Excl, [薬品名]),
+             // 動いた月数は、予定だけの薬でも 0 で入るので「> 0」で見る
+             出どころ = if ([予定日数] ?? 0) > 0 and ([動いた月数] ?? 0) > 0 then "予定・出納"
+                        else if ([予定日数] ?? 0) > 0 then "予定だけ" else "出納だけ",
+             #"1箱消化日数" = if perDay <> null and perDay > 0 then pack / perDay else null]),
+    F2 = Table.ExpandRecordColumn(Fin, "f", {"製剤_表示", "経過措置", "発注除外", "出どころ", "1箱消化日数"}),
+
+    Out = Table.SelectColumns(F2, {
+              "薬品名", "略称", "製剤_表示", "単位", "棚番", "コード", "品名の先頭空白",
+              "経過措置", "経過措置期限", "発注除外", "成分規格", "需要のまとまり", "先発後発",
+              "包装単位", "列数", "出どころ"} & PlanCols & SuiCols & {"1箱消化日数"}),
+    Ren = Table.RenameColumns(Out, {{"製剤_表示", "製剤"}}),
+    Typed = Table.TransformColumnTypes(Ren, {
+              {"略称", type text}, {"製剤", type text}, {"単位", type text}, {"棚番", type text}, {"コード", type text},
+              {"品名の先頭空白", Int64.Type}, {"経過措置", type logical}, {"経過措置期限", type date},
+              {"発注除外", type logical}, {"成分規格", type text}, {"需要のまとまり", type text}, {"先発後発", type text},
+              {"包装単位", type number}, {"列数", type number}, {"出どころ", type text},
+              {"予定日数", Int64.Type}, {"予定数量合計", type number}, {"予定患者数合計", type number},
+              {"最終予定日", type date}, {"平均間隔", type number}, {"ばらつき（CV²）", type number},
+              {"需要の型", type text}, {"1日平均予定", type number},
+              {"動いた月数", Int64.Type}, {"払出合計", type number}, {"払出のあった月数", Int64.Type},
+              {"月平均払出", type number}, {"1日平均払出", type number}, {"仕入合計", type number},
+              {"入庫の概算合計", type number}, {"その他の減少", type number}, {"最後に動いた月", type date},
+              {"最終在庫", type number}, {"動きのない月数", Int64.Type}, {"在庫日数", type number},
+              {"比較月数", Int64.Type}, {"ずれの割合", Percentage.Type}, {"ずれの大きさ", Percentage.Type},
+              {"予定外の月数", Int64.Type}, {"1箱消化日数", type number}}),
+    Result = Table.Sort(Typed, {{"払出合計", Order.Descending}, {"薬品名", Order.Ascending}})
+in
+    Result
+
+
+// ================================================================================
+// ⑩ クエリ名：M_理由コード（データモデルに読み込む）
+//    判定理由・警告のコード表。文言の {値} {線} {在庫} に、薬品ごとの数字が入る
+//    種類と優先度：警告＝1／注意＝2／情報＝3（小さいほど先に見る）
+//    コードの頭文字：S 在庫・不動／D 需要／P 予定とのずれ／E 期限・制度／Q データの確かさ
+//    ※ 文言を直すときは、ここを書き換える（コードは変えない。集計と過去の比較が崩れるため）
+// ================================================================================
+let
+    Source = #table(
+        type table [コード = text, 分類 = text, 種類 = text, 優先度 = Int64.Type, 文言 = text, 条件 = text],
+        {
+            {"S01", "在庫・不動", "警告", 1, "{値}ヶ月、不動です。（在庫 {在庫}）",
+                    "動きのない月数 ≧ 設定「不動とみなす月数」、かつ在庫あり"},
+            {"S02", "在庫・不動", "注意", 2, "在庫が {値}日分あります。（目安 {線}日）",
+                    "在庫日数 ≧ 設定「在庫過多とみなす日数」"},
+            {"S03", "在庫・不動", "注意", 2, "1箱を使い切るのに {値}日かかります。期限に注意です。",
+                    "1箱消化日数 ≧ 設定「1箱消化の注意日数」"},
+            {"S04", "在庫・不動", "情報", 3, "返品・廃棄・移動などで {値} 減っています。",
+                    "その他の減少 > 0"},
+            {"D01", "需要",       "情報", 3, "需要は安定しています。（平均 {値}日に1回）",
+                    "需要の型＝安定"},
+            {"D02", "需要",       "情報", 3, "需要は量がばらつきます。（平均 {値}日に1回）",
+                    "需要の型＝ばらつき大"},
+            {"D03", "需要",       "情報", 3, "需要は間欠的です。（平均 {値}日に1回）",
+                    "需要の型＝間欠"},
+            {"D04", "需要",       "注意", 2, "需要はまばらで、出るときは大口です。（平均 {値}日に1回）",
+                    "需要の型＝まばら・大口"},
+            {"D05", "需要",       "注意", 2, "予定にない払出だけの月が {値}ヶ月あります。（臨時・新患・他科）",
+                    "予定外の月数 ≧ 1"},
+            {"P01", "予定とのずれ", "注意", 2, "予定より {値}% 多く出ています。（臨時・飛び処方・再来局）",
+                    "ずれの割合 ≧ 設定「ずれの注意割合」"},
+            {"P02", "予定とのずれ", "注意", 2, "予定より {値}% 少なく出ています。（処方終了・残薬調整）",
+                    "ずれの割合 ≦ －設定「ずれの注意割合」"},
+            {"P03", "予定とのずれ", "情報", 3, "月ごとに予定と {値}% ずれます。",
+                    "ずれの大きさ ≧ 設定「ずれの大きさの注意割合」"},
+            {"E01", "期限・制度", "警告", 1, "経過措置品です。期限まで {値}日です。",
+                    "経過措置期限が基準日以降"},
+            {"E02", "期限・制度", "警告", 1, "経過措置の期限を {値}日過ぎています。",
+                    "経過措置期限が基準日より前"},
+            {"E03", "期限・制度", "警告", 1, "発注除外ですが、{値} 払い出されています。",
+                    "発注除外、かつ払出合計 > 0"},
+            {"Q01", "データ",     "情報", 3, "出納だけに出ます。予定に一度も出ていません。",
+                    "出どころ＝出納だけ"},
+            {"Q02", "データ",     "注意", 2, "予定だけに出ます。出納と名前がずれている可能性があります。",
+                    "出どころ＝予定だけ"}
+        })
+in
+    Source
+
+
+// ================================================================================
+// ⑪ クエリ名：T_判定理由（データモデルに読み込む）
+//    薬品×理由コードの1行。M_薬品 の指標が条件に当てはまった薬に、コードと文言を付ける
+//    ・値：その薬の数字（文言の {値}）　線：判定に使った設定の値（文言の {線}）
+//    ・基準日：設定の発注日（空欄なら今日）。経過措置の残り日数に使う
+//    ・線は設定テーブルで変える（下の Num の第2引数は空欄のときの仮の値）
+// ================================================================================
+let
+    Prm  = #"設定値",
+    Num  = (key as text, dflt as number) as number =>
+               let v = Record.FieldOrDefault(Prm, key, null)
+               in  if v = null or (v is text and Text.Trim(v) = "") then dflt else Number.From(v),
+    StillMonths = Num("不動とみなす月数", 3),
+    OverDays    = Num("在庫過多とみなす日数", 60),
+    BoxDays     = Num("1箱消化の注意日数", 180),
+    GapRate     = Num("ずれの注意割合", 0.3),
+    GapSize     = Num("ずれの大きさの注意割合", 0.5),
+    BaseDate    = Prm[発注日],
+
+    Codes = Table.Buffer(#"M_理由コード"),
+    Drugs = #"M_薬品",
+
+    // 1つの薬について、当てはまるコードを {コード, 値, 線} の並びで返す
+    Hits = (r as record) as list =>
+        let
+            stock = r[最終在庫] ?? 0,
+            still = r[動きのない月数],
+            days  = r[在庫日数],
+            box   = r[#"1箱消化日数"],
+            less  = r[その他の減少] ?? 0,
+            adi   = r[平均間隔],
+            typ   = r[需要の型],
+            gr    = r[ずれの割合],
+            gs    = r[ずれの大きさ],
+            trans = r[経過措置期限],
+            left  = if trans = null then null else Duration.Days(trans - BaseDate),
+            out   = r[払出合計] ?? 0
+        in
+            List.RemoveNulls({
+                if stock > 0 and still <> null and still >= StillMonths then {"S01", still, StillMonths} else null,
+                if days <> null and days >= OverDays then {"S02", days, OverDays} else null,
+                if box <> null and box >= BoxDays then {"S03", box, BoxDays} else null,
+                if less > 0 then {"S04", less, null} else null,
+                if typ = "安定" then {"D01", adi, null}
+                else if typ = "ばらつき大" then {"D02", adi, null}
+                else if typ = "間欠" then {"D03", adi, null}
+                else if typ = "まばら・大口" then {"D04", adi, null} else null,
+                if (r[予定外の月数] ?? 0) >= 1 then {"D05", r[予定外の月数], 1} else null,
+                if gr <> null and gr >= GapRate then {"P01", gr * 100, GapRate * 100} else null,
+                if gr <> null and gr <= -GapRate then {"P02", -gr * 100, GapRate * 100} else null,
+                if gs <> null and gs >= GapSize then {"P03", gs * 100, GapSize * 100} else null,
+                if left <> null and left >= 0 then {"E01", left, null} else null,
+                if left <> null and left < 0 then {"E02", -left, null} else null,
+                if r[発注除外] = true and out > 0 then {"E03", out, null} else null,
+                if r[出どころ] = "出納だけ" then {"Q01", null, null} else null,
+                if r[出どころ] = "予定だけ" then {"Q02", null, null} else null
+            }),
+
+    Rows = List.Combine(Table.TransformRows(Drugs, (r) =>
+               List.Transform(Hits(r), (h) => [薬品名 = r[薬品名], コード = h{0}, 値 = h{1}, 線 = h{2}, 在庫 = r[最終在庫]]))),
+    T    = Table.FromRecords(Rows, type table [薬品名 = text, コード = text, 値 = nullable number, 線 = nullable number, 在庫 = nullable number]),
+
+    // 文言を作る：{値} {線} {在庫} を数字に置き換える
+    F    = (n as nullable number) as text => if n = null then "" else Number.ToText(Number.Round(n, 0), "N0", "ja-JP"),
+    J    = Table.ExpandTableColumn(Table.NestedJoin(T, {"コード"}, Codes, {"コード"}, "c", JoinKind.LeftOuter), "c",
+               {"分類", "種類", "優先度", "文言"}, {"分類", "種類", "優先度", "文言の型"}),
+    Msg  = Table.AddColumn(J, "文言", each
+               Text.Replace(Text.Replace(Text.Replace([文言の型] ?? "", "{値}", F([値])), "{線}", F([線])), "{在庫}", F([在庫])),
+               type text),
+    Out  = Table.SelectColumns(Msg, {"薬品名", "コード", "分類", "種類", "優先度", "文言", "値", "線"}),
+    Typed = Table.TransformColumnTypes(Out, {{"分類", type text}, {"種類", type text}, {"優先度", Int64.Type}}),
+    Result = Table.Sort(Typed, {{"優先度", Order.Ascending}, {"コード", Order.Ascending}, {"薬品名", Order.Ascending}})
+in
+    Result

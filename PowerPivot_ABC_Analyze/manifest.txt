@@ -1,0 +1,17 @@
+# 組み立ての順番（上から順に連結する）。# で始まる行は無視
+# 「../_shared/」は M言語/_shared の共通クエリ（PowerQuery_ABC と同じコード）
+VERSION=0.1.1
+HEADER=src/_header.txt
+OUTPUT=dist/PowerPivot_ABC_{VERSION}.txt
+../_shared/00_fx_正規化.m
+../_shared/01_設定値.m
+../_shared/02_fx_使用量読込.m
+../_shared/03_日次データ.m
+../_shared/04_fx_卸の休み.m
+src/05_出納.m
+src/06_T_日次.m
+src/07_T_月次.m
+src/08_M_日付.m
+src/09_M_薬品.m
+src/10_M_理由コード.m
+src/11_T_判定理由.m
