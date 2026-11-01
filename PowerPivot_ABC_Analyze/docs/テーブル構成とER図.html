@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>PowerPivot_ABC テーブル構成とER図</title>
+<style>
+  @page { size: A4; margin: 16mm 14mm 16mm 14mm; }
+  body { font-family: "Yu Gothic UI", "Yu Gothic", "Meiryo", sans-serif; font-size: 10.5pt; color: #222; line-height: 1.55; }
+  h1 { font-size: 18pt; border-bottom: 2px solid #345; padding-bottom: 4px; margin: 0 0 6px; }
+  h2 { font-size: 13.5pt; border-left: 6px solid #345; padding-left: 8px; margin: 22px 0 8px; page-break-after: avoid; }
+  h3 { font-size: 11.5pt; margin: 16px 0 6px; color: #234; page-break-after: avoid; }
+  p  { margin: 4px 0; }
+  .meta { color: #555; font-size: 9.5pt; }
+  table { border-collapse: collapse; width: 100%; margin: 6px 0 10px; page-break-inside: auto; font-size: 9.5pt; }
+  tr { page-break-inside: avoid; }
+  th, td { border: 1px solid #999; padding: 3px 6px; vertical-align: top; text-align: left; }
+  th { background: #e4e9f0; font-weight: 600; }
+  td.k { font-weight: 600; }
+  .key { color: #a33; font-weight: 700; }
+  .fk  { color: #26a; font-weight: 700; }
+  .note { background: #f6f7f9; border: 1px solid #ccd; padding: 6px 10px; margin: 8px 0; font-size: 9.5pt; }
+  .pb { page-break-before: always; }
+  .small { font-size: 9pt; color: #444; }
+  .tag { display: inline-block; border: 1px solid #889; border-radius: 3px; padding: 0 5px; font-size: 8.5pt; margin-right: 4px; background: #fff; }
+  svg text { font-family: "Yu Gothic UI", "Yu Gothic", "Meiryo", sans-serif; }
+  .grid { width: 100%; }
+  .grid > tbody > tr > td { border: none; padding: 0 8px 0 0; vertical-align: top; }
+</style>
+</head>
+<body>
+
+<h1>在庫分析 PowerPivot_ABC：テーブル構成とER図</h1>
+<p class="meta">版：0.1　改定日：2026-11-02　状態：作成中（PowerPivot_ABC 0.1.2 時点）　作成：関根禎浩</p>
+<table>
+  <tr><th style="width:8%">版</th><th style="width:18%">改定日</th><th>内容</th></tr>
+  <tr><td>0.1</td><td>2026-11-02</td><td>初版（0.1.2 のクエリから起こした）</td></tr>
+</table>
+
+<h2>1. 全体像：ブックの中に何があるか</h2>
+<p>分析用ブック（Excel）は、次の3種類で構成されます。</p>
+<table>
+  <tr><th style="width:22%">種類</th><th style="width:38%">中身</th><th>どこにあるか</th></tr>
+  <tr><td class="k">手入力テーブル（6つ）</td><td>設定／経過措置リスト／発注除外／在庫情報／追加休業日／薬品グループ</td><td>シート上のテーブル。初期テーブル作成（A～F）で作り、リンク解除して手で入力する。テーブル名で読むので、シート名は何でもよい</td></tr>
+  <tr><td class="k">接続のみのクエリ（⓪～⑤）</td><td>fx_正規化／設定値／fx_使用量読込／日次データ／fx_卸の休み／出納</td><td>シートには出ない（［クエリと接続］の一覧だけ）。ファイルを読み、下の表の材料を作る</td></tr>
+  <tr><td class="k">データモデルの表（⑥～⑪）</td><td>T_日次／T_月次／M_日付／M_薬品／M_理由コード／T_判定理由</td><td>シートには出ず、データモデル（Power Pivot）に入る。ピボットテーブルはここから作る</td></tr>
+</table>
+
+<h3>1-1. データの流れ</h3>
+<svg viewBox="0 0 760 330" width="100%" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#345"/></marker>
+  </defs>
+  <text x="80"  y="18" font-size="11" fill="#555" text-anchor="middle">入力（ファイル・手入力）</text>
+  <text x="330" y="18" font-size="11" fill="#555" text-anchor="middle">接続のみのクエリ（⓪～⑤）</text>
+  <text x="620" y="18" font-size="11" fill="#555" text-anchor="middle">データモデル（⑥～⑪）→ ピボット</text>
+
+  <g font-size="10.5">
+    <rect x="10" y="40" width="150" height="46" rx="4" fill="#fff4d6" stroke="#b8860b"/>
+    <text x="85" y="58" text-anchor="middle">実績フォルダ</text>
+    <text x="85" y="74" text-anchor="middle" font-size="9">薬品使用量分析データ .xls（予定）</text>
+
+    <rect x="10" y="110" width="150" height="46" rx="4" fill="#fff4d6" stroke="#b8860b"/>
+    <text x="85" y="128" text-anchor="middle">出納フォルダ</text>
+    <text x="85" y="144" text-anchor="middle" font-size="9">月次の数量一覧 .xls（実際）</text>
+
+    <rect x="10" y="190" width="150" height="110" rx="4" fill="#e8f5e9" stroke="#2e7d32"/>
+    <text x="85" y="208" text-anchor="middle">手入力テーブル（ブック内）</text>
+    <text x="85" y="226" text-anchor="middle" font-size="9.5">設定</text>
+    <text x="85" y="242" text-anchor="middle" font-size="9.5">経過措置リスト／発注除外</text>
+    <text x="85" y="258" text-anchor="middle" font-size="9.5">在庫情報／薬品グループ</text>
+    <text x="85" y="274" text-anchor="middle" font-size="9.5">追加休業日</text>
+  </g>
+
+  <g font-size="10.5">
+    <rect x="250" y="40" width="160" height="34" rx="4" fill="#eef" stroke="#345"/>
+    <text x="330" y="62" text-anchor="middle">②③ 日次データ</text>
+    <rect x="250" y="110" width="160" height="34" rx="4" fill="#eef" stroke="#345"/>
+    <text x="330" y="132" text-anchor="middle">⑤ 出納</text>
+    <rect x="250" y="190" width="160" height="34" rx="4" fill="#eef" stroke="#345"/>
+    <text x="330" y="212" text-anchor="middle">① 設定値</text>
+    <rect x="250" y="250" width="160" height="34" rx="4" fill="#eef" stroke="#345"/>
+    <text x="330" y="272" text-anchor="middle">④ fx_卸の休み</text>
+    <text x="330" y="312" text-anchor="middle" font-size="9.5" fill="#555">⓪ fx_正規化 は全部で使う（表記ゆれをそろえる）</text>
+  </g>
+
+  <g font-size="10.5">
+    <rect x="510" y="40" width="90" height="30" rx="4" fill="#dbe9ff" stroke="#1a4f9c"/>
+    <text x="555" y="60" text-anchor="middle">⑥ T_日次</text>
+    <rect x="510" y="110" width="90" height="30" rx="4" fill="#dbe9ff" stroke="#1a4f9c"/>
+    <text x="555" y="130" text-anchor="middle">⑦ T_月次</text>
+    <rect x="510" y="180" width="90" height="30" rx="4" fill="#ffe3e3" stroke="#9c1a1a"/>
+    <text x="555" y="200" text-anchor="middle">⑧ M_日付</text>
+    <rect x="510" y="235" width="90" height="30" rx="4" fill="#ffe3e3" stroke="#9c1a1a"/>
+    <text x="555" y="255" text-anchor="middle">⑨ M_薬品</text>
+    <rect x="650" y="235" width="100" height="30" rx="4" fill="#ffe3e3" stroke="#9c1a1a"/>
+    <text x="700" y="255" text-anchor="middle">⑩ M_理由コード</text>
+    <rect x="650" y="290" width="100" height="30" rx="4" fill="#dbe9ff" stroke="#1a4f9c"/>
+    <text x="700" y="310" text-anchor="middle">⑪ T_判定理由</text>
+  </g>
+
+  <g stroke="#345" stroke-width="1.3" fill="none" marker-end="url(#ar)">
+    <path d="M160,63 L250,57"/>
+    <path d="M160,133 L250,127"/>
+    <path d="M160,215 L250,207"/>
+    <path d="M160,262 L250,267"/>
+    <path d="M410,57 L510,55"/>
+    <path d="M410,127 L510,125"/>
+    <path d="M410,267 L510,195"/>
+    <path d="M555,70 L555,110"/>
+    <path d="M555,140 L555,180"/>
+    <path d="M575,140 L575,235"/>
+    <path d="M410,135 L510,245"/>
+    <path d="M600,250 L650,250"/>
+    <path d="M600,257 L650,300"/>
+    <path d="M700,265 L700,290"/>
+  </g>
+  <text x="460" y="48" font-size="9" fill="#555" text-anchor="middle">予定</text>
+  <text x="460" y="118" font-size="9" fill="#555" text-anchor="middle">実際</text>
+</svg>
+<p class="small">T_日次 は予定（分析データ）だけから、T_月次 は出納（実際）と T_日次（予定）の両方から作る。M_薬品 は T_日次・T_月次・出納・手入力テーブルを薬ごとに1行にまとめ、T_判定理由 は M_薬品 の指標を M_理由コード の条件に当てて作る。</p>
+
+<h2 class="pb">2. ER図（データモデルのリレーションシップ）</h2>
+<p>多（T_ の表）→ 1（M_ の表）の向きで6本。ピボットでは M_ の列を行や列に、T_ の列を値（合計・件数）に置く。</p>
+<svg viewBox="0 0 760 520" width="100%" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="many" markerWidth="14" markerHeight="14" refX="1" refY="7" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M13,1 L1,7 L13,13 M1,7 L13,7" stroke="#345" stroke-width="1.3" fill="none"/>
+    </marker>
+    <marker id="one" markerWidth="10" markerHeight="14" refX="9" refY="7" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M6,1 L6,13" stroke="#345" stroke-width="1.6"/>
+    </marker>
+  </defs>
+  <g font-size="9.8">
+    <rect x="20" y="20" width="200" height="190" fill="#fff" stroke="#9c1a1a" stroke-width="1.5"/>
+    <rect x="20" y="20" width="200" height="24" fill="#ffe3e3" stroke="#9c1a1a" stroke-width="1.5"/>
+    <text x="120" y="37" text-anchor="middle" font-weight="700">M_日付（日付：1行）</text>
+    <text x="30" y="60" fill="#a33" font-weight="700">● 日付</text>
+    <text x="30" y="76">年／月／年月／月初／期</text>
+    <text x="30" y="92">曜日／曜日番号</text>
+    <text x="30" y="108">処方のあった日</text>
+    <text x="30" y="124">卸の営業日／休みの理由</text>
+    <text x="30" y="150" fill="#555" font-size="9">範囲：実績の期間と出納の期間を</text>
+    <text x="30" y="164" fill="#555" font-size="9">含む月の 1日～末日</text>
+
+    <rect x="280" y="20" width="200" height="190" fill="#fff" stroke="#9c1a1a" stroke-width="1.5"/>
+    <rect x="280" y="20" width="200" height="24" fill="#ffe3e3" stroke="#9c1a1a" stroke-width="1.5"/>
+    <text x="380" y="37" text-anchor="middle" font-weight="700">M_薬品（薬品：1行）</text>
+    <text x="290" y="60" fill="#a33" font-weight="700">● 薬品名</text>
+    <text x="290" y="76">略称／製剤／単位／棚番／コード</text>
+    <text x="290" y="92">経過措置／発注除外／グループ</text>
+    <text x="290" y="108">包装単位／列数／出どころ</text>
+    <text x="290" y="124">予定の指標（8列）</text>
+    <text x="290" y="140">出納の指標（16列）</text>
+    <text x="290" y="156">1箱消化日数</text>
+    <text x="290" y="182" fill="#555" font-size="9">予定か出納に一度でも出た薬</text>
+
+    <rect x="540" y="20" width="200" height="190" fill="#fff" stroke="#9c1a1a" stroke-width="1.5"/>
+    <rect x="540" y="20" width="200" height="24" fill="#ffe3e3" stroke="#9c1a1a" stroke-width="1.5"/>
+    <text x="640" y="37" text-anchor="middle" font-weight="700">M_理由コード（コード：1行）</text>
+    <text x="550" y="60" fill="#a33" font-weight="700">● コード</text>
+    <text x="550" y="76">分類／種類／優先度</text>
+    <text x="550" y="92">文言（{値}{線}{在庫} 入り）</text>
+    <text x="550" y="108">条件</text>
+    <text x="550" y="150" fill="#555" font-size="9">17コード（S／D／P／E／Q）</text>
+    <text x="550" y="164" fill="#555" font-size="9">クエリに固定。コードは変えない</text>
+
+    <rect x="20" y="320" width="200" height="150" fill="#fff" stroke="#1a4f9c" stroke-width="1.5"/>
+    <rect x="20" y="320" width="200" height="24" fill="#dbe9ff" stroke="#1a4f9c" stroke-width="1.5"/>
+    <text x="120" y="337" text-anchor="middle" font-weight="700">T_日次（日付×薬品：1行）</text>
+    <text x="30" y="360" fill="#26a" font-weight="700">▶ 日付</text>
+    <text x="30" y="376" fill="#26a" font-weight="700">▶ 薬品名</text>
+    <text x="30" y="392">予定数量／予定患者数／在庫量</text>
+    <text x="30" y="420" fill="#555" font-size="9">出どころ：薬品使用量分析データ（予定）</text>
+
+    <rect x="280" y="320" width="200" height="150" fill="#fff" stroke="#1a4f9c" stroke-width="1.5"/>
+    <rect x="280" y="320" width="200" height="24" fill="#dbe9ff" stroke="#1a4f9c" stroke-width="1.5"/>
+    <text x="380" y="337" text-anchor="middle" font-weight="700">T_月次（月×薬品：1行）</text>
+    <text x="290" y="360" fill="#26a" font-weight="700">▶ 月（その月の1日）</text>
+    <text x="290" y="376" fill="#26a" font-weight="700">▶ 薬品名</text>
+    <text x="290" y="392">繰越／仕入／払出／その他の増減／在庫</text>
+    <text x="290" y="408">入庫の概算／予定数量／予定患者数</text>
+    <text x="290" y="424">予定日数／予定とのずれ／ずれの割合</text>
+    <text x="290" y="450" fill="#555" font-size="9">出どころ：出納（実際）＋ T_日次（予定）</text>
+
+    <rect x="540" y="320" width="200" height="150" fill="#fff" stroke="#1a4f9c" stroke-width="1.5"/>
+    <rect x="540" y="320" width="200" height="24" fill="#dbe9ff" stroke="#1a4f9c" stroke-width="1.5"/>
+    <text x="640" y="337" text-anchor="middle" font-weight="700">T_判定理由（薬品×コード：1行）</text>
+    <text x="550" y="360" fill="#26a" font-weight="700">▶ 薬品名</text>
+    <text x="550" y="376" fill="#26a" font-weight="700">▶ コード</text>
+    <text x="550" y="392">分類／種類／優先度／文言</text>
+    <text x="550" y="408">値／線</text>
+    <text x="550" y="450" fill="#555" font-size="9">M_薬品 の指標が条件に当たった薬だけ</text>
+  </g>
+
+  <g stroke="#345" stroke-width="1.3" fill="none" marker-start="url(#many)" marker-end="url(#one)">
+    <path d="M90,320 L90,210"/>
+    <path d="M170,320 L170,270 L320,270 L320,210"/>
+    <path d="M330,320 L330,290 L150,290 L150,210"/>
+    <path d="M400,320 L400,210"/>
+    <path d="M590,320 L590,270 L450,270 L450,210"/>
+    <path d="M660,320 L660,210"/>
+  </g>
+  <g font-size="9" fill="#345">
+    <text x="94" y="265">日付</text>
+    <text x="226" y="264">薬品名</text>
+    <text x="236" y="302">月 → 日付</text>
+    <text x="404" y="265">薬品名</text>
+    <text x="500" y="264">薬品名</text>
+    <text x="664" y="265">コード</text>
+  </g>
+  <g font-size="9.5" fill="#333">
+    <text x="20" y="500">凡例：● 主キー（1 側）　▶ 外部キー（多 側）　線の T_ 側が「多」、M_ 側が「1」</text>
+  </g>
+</svg>
+
+<h3>2-1. リレーションシップ一覧（Excel の［データ］→［リレーションシップ］で作る6本）</h3>
+<table>
+  <tr><th style="width:5%">No.</th><th style="width:30%">テーブル（多）・列</th><th style="width:30%">関連テーブル（1）・列</th><th>意味</th></tr>
+  <tr><td>1</td><td>T_日次［日付］</td><td>M_日付［日付］</td><td>日ごとの予定を暦（曜日・営業日）で見る</td></tr>
+  <tr><td>2</td><td>T_月次［月］</td><td>M_日付［日付］</td><td>月は「その月の1日」なので日付の表につなげる</td></tr>
+  <tr><td>3</td><td>T_日次［薬品名］</td><td>M_薬品［薬品名］</td><td>日ごとの予定を薬の属性（製剤・グループ）で見る</td></tr>
+  <tr><td>4</td><td>T_月次［薬品名］</td><td>M_薬品［薬品名］</td><td>月ごとの出納・予定を薬の属性で見る</td></tr>
+  <tr><td>5</td><td>T_判定理由［薬品名］</td><td>M_薬品［薬品名］</td><td>判定理由に薬の属性と指標を添える</td></tr>
+  <tr><td>6</td><td>T_判定理由［コード］</td><td>M_理由コード［コード］</td><td>判定理由を分類・種類・優先度で並べる</td></tr>
+</table>
+<div class="note">
+  薬品名が全表のキー。エリシアSの出力に YJコードがないため、fx_正規化 でそろえた薬品名（出納では「品名」）をそのまま結合に使う。
+  手入力テーブルの薬品名も、M_薬品 に出る表記と同じに書く。
+</div>
+
+<h2 class="pb">3. 手入力テーブル（シート上のテーブル）</h2>
+<p>初期テーブル作成（dist/PowerPivot_初期テーブル作成_&lt;版&gt;.txt の A～F）で作り、［テーブルデザイン］→［リンク解除］してから手で入力する。設定だけが必須。</p>
+
+<h3>A　設定（必須）</h3>
+<table>
+  <tr><th style="width:30%">項目（A列）</th><th style="width:22%">値（B列）の例</th><th>空欄のとき／使うところ</th></tr>
+  <tr><td>フォルダパス</td><td>C:\薬局\使用量分析_実績</td><td>必須。薬品使用量分析データのフォルダ（③）</td></tr>
+  <tr><td>開始日</td><td>2025/10/01</td><td>必須。実績を読む期間の始め（③・⑦・⑧）</td></tr>
+  <tr><td>終了日</td><td>2026/09/30</td><td>必須。実績を読む期間の終わり</td></tr>
+  <tr><td>出納フォルダパス</td><td>C:\薬局\出納</td><td>必須。出納のフォルダ（⑤。フォルダの全期間を読む）</td></tr>
+  <tr><td>標準の包装単位</td><td>100</td><td>100。在庫情報に包装単位がない薬の1箱の数（⑨ 1箱消化日数）</td></tr>
+  <tr><td>年末年始の休み始め</td><td>12/29</td><td>12/29。卸の休み（④）</td></tr>
+  <tr><td>年末年始の休み終わり</td><td>1/3</td><td>1/3</td></tr>
+  <tr><td>発注日</td><td>（空欄）</td><td>今日。経過措置の残り日数の基準日（⑪ E01・E02）</td></tr>
+  <tr><td>不動とみなす月数</td><td>3</td><td>3。S01 の線</td></tr>
+  <tr><td>在庫過多とみなす日数</td><td>60</td><td>60。S02 の線</td></tr>
+  <tr><td>1箱消化の注意日数</td><td>180</td><td>180。S03 の線</td></tr>
+  <tr><td>ずれの注意割合</td><td>0.3</td><td>0.3。P01・P02 の線（30%）</td></tr>
+  <tr><td>ずれの大きさの注意割合</td><td>0.5</td><td>0.5。P03 の線（50%）</td></tr>
+</table>
+<p class="small">設定には計算に使う値とフォルダだけを入れる。エリシアSの列名・ファイル名の目印は ① 設定値 に固定で書いてある。</p>
+
+<table class="grid"><tbody><tr>
+<td style="width:50%">
+<h3>B　経過措置リスト（任意）</h3>
+<table>
+  <tr><th>列</th><th>型</th><th>内容</th></tr>
+  <tr><td>薬品名</td><td>文字</td><td>M_薬品 と同じ表記</td></tr>
+  <tr><td>経過措置期限</td><td>日付</td><td>⑨ 経過措置期限、⑪ E01・E02</td></tr>
+</table>
+<h3>C　発注除外（任意）</h3>
+<table>
+  <tr><th>列</th><th>型</th><th>内容</th></tr>
+  <tr><td>薬品名</td><td>文字</td><td>不動確定・マスタ削除の薬</td></tr>
+  <tr><td>理由</td><td>文字</td><td>記録用（クエリは読まない）</td></tr>
+  <tr><td>登録日</td><td>日付</td><td>記録用</td></tr>
+</table>
+<h3>D　在庫情報（任意）</h3>
+<table>
+  <tr><th>列</th><th>型</th><th>内容</th></tr>
+  <tr><td>薬品名</td><td>文字</td><td></td></tr>
+  <tr><td>包装単位</td><td>数</td><td>1箱の数（100・500・1000）。⑨ 1箱消化日数</td></tr>
+  <tr><td>列数</td><td>数</td><td>棚の区画の列数（今は表示のみ）</td></tr>
+</table>
+</td>
+<td>
+<h3>E　追加休業日（任意）</h3>
+<table>
+  <tr><th>列</th><th>型</th><th>内容</th></tr>
+  <tr><td>日付</td><td>日付</td><td>卸が休む日（お盆・卸の都合）。④ → M_日付</td></tr>
+  <tr><td>理由</td><td>文字</td><td>M_日付［休みの理由］に出る</td></tr>
+</table>
+<h3>F　薬品グループ（任意）</h3>
+<table>
+  <tr><th>列</th><th>型</th><th>内容</th></tr>
+  <tr><td>薬品名</td><td>文字</td><td></td></tr>
+  <tr><td>成分規格</td><td>文字</td><td>成分と規格（例：タンドスピロン 10mg）</td></tr>
+  <tr><td>需要のまとまり</td><td>文字</td><td>入れ替えて使える薬の組</td></tr>
+  <tr><td>先発後発</td><td>文字</td><td>先発／後発 など</td></tr>
+</table>
+<div class="note">B～F は見出しだけで作られる。発注支援（PowerQuery_ABC）のブックに同じテーブルがあれば、中身をコピーして貼ってよい。</div>
+</td>
+</tr></tbody></table>
+
+<h2 class="pb">4. データモデルの表（⑥～⑪）</h2>
+<p>凡例：<span class="key">主キー</span>（その表で1行を決める列）　<span class="fk">外部キー</span>（M_ の表につなぐ列）</p>
+
+<h3>⑥ T_日次　— 日付×薬品（予定）</h3>
+<table>
+  <tr><th style="width:24%">列</th><th style="width:12%">型</th><th>内容</th></tr>
+  <tr><td class="fk">日付</td><td>日付</td><td>分析データのシート名の日付 → M_日付</td></tr>
+  <tr><td class="fk">薬品名</td><td>文字</td><td>fx_正規化 後の薬品名 → M_薬品</td></tr>
+  <tr><td>予定数量</td><td>数</td><td>その日の予定使用量の合計（定期の予定。臨時・新患・飛び処方は入らない）</td></tr>
+  <tr><td>予定患者数</td><td>数</td><td>その日にその薬が予定されていた患者の数（定期分の頻度）</td></tr>
+  <tr><td>在庫量</td><td>数</td><td>その日のシートの在庫数量（発注残を含まない）</td></tr>
+</table>
+
+<h3>⑦ T_月次　— 月×薬品（実際と予定）</h3>
+<table>
+  <tr><th style="width:24%">列</th><th style="width:12%">型</th><th>内容</th></tr>
+  <tr><td class="fk">月</td><td>日付</td><td>その月の1日 → M_日付［日付］</td></tr>
+  <tr><td class="fk">薬品名</td><td>文字</td><td>→ M_薬品</td></tr>
+  <tr><td>出納に載った</td><td>真偽</td><td>その月の出納にこの薬の行がある（＝何かしら動いた）</td></tr>
+  <tr><td>出納データあり</td><td>真偽</td><td>その月の出納ファイルがある</td></tr>
+  <tr><td>予定データあり</td><td>真偽</td><td>設定の開始日～終了日がその月をまるごと含む</td></tr>
+  <tr><td>繰越数量</td><td>数</td><td>出納の値（載っていない月は空欄）</td></tr>
+  <tr><td>仕入数量</td><td>数</td><td>出納の値（出納のある月に載っていなければ 0）</td></tr>
+  <tr><td>払出数量</td><td>数</td><td>同上</td></tr>
+  <tr><td>その他の増減</td><td>数</td><td>在庫 −（繰越 ＋ 仕入 − 払出）。マイナス：返品・廃棄・移動・譲渡、プラス：受け入れ・棚卸調整</td></tr>
+  <tr><td>在庫数量</td><td>数</td><td>月末在庫（載っていない月は空欄＝前の月と同じ）</td></tr>
+  <tr><td>入庫の概算</td><td>数</td><td>仕入数量 ＋ その他の増減のプラス分</td></tr>
+  <tr><td>予定数量</td><td>数</td><td>T_日次 の月合計（予定データのある月だけ）</td></tr>
+  <tr><td>予定患者数</td><td>数</td><td>同上</td></tr>
+  <tr><td>予定日数</td><td>整数</td><td>その月に予定があった日数</td></tr>
+  <tr><td>予定とのずれ</td><td>数</td><td>払出数量 − 予定数量（出納と予定の両方がある月だけ）</td></tr>
+  <tr><td>ずれの割合</td><td>％</td><td>予定とのずれ ÷ 予定数量</td></tr>
+</table>
+
+<h3>⑧ M_日付　— 日付</h3>
+<table>
+  <tr><th style="width:24%">列</th><th style="width:12%">型</th><th>内容</th></tr>
+  <tr><td class="key">日付</td><td>日付</td><td>実績の期間と出納の期間をすべて含む月の 1日～末日</td></tr>
+  <tr><td>年／月</td><td>整数</td><td></td></tr>
+  <tr><td>年月</td><td>文字</td><td>yyyy-MM</td></tr>
+  <tr><td>月初</td><td>日付</td><td>その月の1日（T_月次［月］と同じ値）</td></tr>
+  <tr><td>期</td><td>文字</td><td>1-3月／4-6月／7-9月／10-12月</td></tr>
+  <tr><td>曜日／曜日番号</td><td>文字／整数</td><td>月＝1 … 日＝7</td></tr>
+  <tr><td>処方のあった日</td><td>真偽</td><td>T_日次 にその日のデータがある（薬局が開いていた日の目安）</td></tr>
+  <tr><td>卸の営業日</td><td>真偽</td><td>④ fx_卸の休み の判定（土日・祝日・年末年始・追加休業日）</td></tr>
+  <tr><td>休みの理由</td><td>文字</td><td>休みの種類（祝日名・年末年始・追加休業日の理由）</td></tr>
+</table>
+
+<h3 class="pb">⑨ M_薬品　— 薬品（属性と指標）</h3>
+<p class="small">対象：予定（T_日次）か出納（T_月次）に一度でも出てきた薬。出どころの列：<span class="tag">実績</span>分析データから <span class="tag">出納</span>出納の最新の行から <span class="tag">手入力</span>手入力テーブルから <span class="tag">計算</span>T_日次・T_月次から計算</p>
+<table>
+  <tr><th style="width:26%">列</th><th style="width:10%">型</th><th style="width:10%">出どころ</th><th>内容</th></tr>
+  <tr><td class="key">薬品名</td><td>文字</td><td></td><td>fx_正規化 後の名前（出納の「品名」と同じ）</td></tr>
+  <tr><td>略称</td><td>文字</td><td>実績</td><td>表示用（B列）。一番新しい日付のもの</td></tr>
+  <tr><td>製剤</td><td>文字</td><td>出納→実績</td><td>出納の製剤。なければ分析データの製剤</td></tr>
+  <tr><td>単位／棚番／コード</td><td>文字</td><td>出納</td><td>出納の最新の行</td></tr>
+  <tr><td>品名の先頭空白</td><td>整数</td><td>出納</td><td>品名の前の空白の数（意味は未確認）</td></tr>
+  <tr><td>経過措置／経過措置期限</td><td>真偽／日付</td><td>手入力</td><td>経過措置リストにある／その期限</td></tr>
+  <tr><td>発注除外</td><td>真偽</td><td>手入力</td><td>発注除外にある</td></tr>
+  <tr><td>成分規格／需要のまとまり／先発後発</td><td>文字</td><td>手入力</td><td>薬品グループ</td></tr>
+  <tr><td>包装単位／列数</td><td>数</td><td>手入力</td><td>在庫情報</td></tr>
+  <tr><td>出どころ</td><td>文字</td><td>計算</td><td>予定・出納／予定だけ／出納だけ（Q01・Q02）</td></tr>
+  <tr><th colspan="4">予定の指標（T_日次：設定の開始日～終了日）</th></tr>
+  <tr><td>予定日数</td><td>整数</td><td>計算</td><td>予定があった日数</td></tr>
+  <tr><td>予定数量合計／予定患者数合計</td><td>数</td><td>計算</td><td></td></tr>
+  <tr><td>最終予定日</td><td>日付</td><td>計算</td><td>最後に予定があった日</td></tr>
+  <tr><td>平均間隔</td><td>数</td><td>計算</td><td>処方のあった日数 ÷ 予定日数（1 なら毎日、10 なら10日に1回）</td></tr>
+  <tr><td>ばらつき（CV²）</td><td>数</td><td>計算</td><td>予定があった日の数量の（標準偏差 ÷ 平均）²</td></tr>
+  <tr><td>需要の型</td><td>文字</td><td>計算</td><td>安定／ばらつき大／間欠／まばら・大口（平均間隔 1.32、ばらつき 0.49 が境）</td></tr>
+  <tr><td>1日平均予定</td><td>数</td><td>計算</td><td>予定数量合計 ÷ 処方のあった日数</td></tr>
+  <tr><th colspan="4">出納の指標（T_月次：出納のある月）</th></tr>
+  <tr><td>動いた月数</td><td>整数</td><td>計算</td><td>出納に載った月の数</td></tr>
+  <tr><td>払出合計／払出のあった月数／月平均払出</td><td>数／整数／数</td><td>計算</td><td></td></tr>
+  <tr><td>1日平均払出</td><td>数</td><td>計算</td><td>払出合計 ÷ 出納の月の暦日数</td></tr>
+  <tr><td>仕入合計／入庫の概算合計</td><td>数</td><td>計算</td><td></td></tr>
+  <tr><td>その他の減少</td><td>数</td><td>計算</td><td>その他の増減のマイナス分の合計（返品・廃棄・移動など）（S04）</td></tr>
+  <tr><td>最後に動いた月</td><td>日付</td><td>計算</td><td></td></tr>
+  <tr><td>最終在庫</td><td>数</td><td>計算</td><td>最後に出納に載った月の在庫（そのあと動いていなければ今も同じ）</td></tr>
+  <tr><td>動きのない月数</td><td>整数</td><td>計算</td><td>最後に載った月から一番新しい出納の月まで（S01）</td></tr>
+  <tr><td>在庫日数</td><td>数</td><td>計算</td><td>最終在庫 ÷ 1日平均払出（S02）</td></tr>
+  <tr><td>比較月数</td><td>整数</td><td>計算</td><td>出納と予定の両方がある月の数</td></tr>
+  <tr><td>ずれの割合</td><td>％</td><td>計算</td><td>（払出 − 予定）の合計 ÷ 予定の合計（P01・P02）</td></tr>
+  <tr><td>ずれの大きさ</td><td>％</td><td>計算</td><td>月ごとの｜払出 − 予定｜の合計 ÷ 予定の合計（P03）</td></tr>
+  <tr><td>予定外の月数</td><td>整数</td><td>計算</td><td>予定が 0 なのに払出があった月の数（D05）</td></tr>
+  <tr><th colspan="4">その他</th></tr>
+  <tr><td>1箱消化日数</td><td>数</td><td>計算</td><td>包装単位（なければ標準の包装単位）÷ 1日平均払出（S03）</td></tr>
+</table>
+
+<h3 class="pb">⑩ M_理由コード　— 判定理由のコード表（クエリに固定）</h3>
+<table>
+  <tr><th style="width:18%">列</th><th style="width:10%">型</th><th>内容</th></tr>
+  <tr><td class="key">コード</td><td>文字</td><td>S 在庫・不動／D 需要／P 予定とのずれ／E 期限・制度／Q データ。番号は変えない・使い回さない</td></tr>
+  <tr><td>分類</td><td>文字</td><td>在庫・不動／需要／予定とのずれ／期限・制度／データ</td></tr>
+  <tr><td>種類</td><td>文字</td><td>警告／注意／情報</td></tr>
+  <tr><td>優先度</td><td>整数</td><td>警告＝1／注意＝2／情報＝3（小さいほど先に見る）</td></tr>
+  <tr><td>文言</td><td>文字</td><td>{値}{線}{在庫} に薬ごとの数字が入る</td></tr>
+  <tr><td>条件</td><td>文字</td><td>当てはまる条件の説明（人が読む用）</td></tr>
+</table>
+<table>
+  <tr><th style="width:8%">コード</th><th style="width:7%">種類</th><th style="width:42%">文言</th><th>条件</th></tr>
+  <tr><td>S01</td><td>警告</td><td>{値}ヶ月、不動です。（在庫 {在庫}）</td><td>動きのない月数 ≧ 不動とみなす月数、かつ在庫あり</td></tr>
+  <tr><td>S02</td><td>注意</td><td>在庫が {値}日分あります。（目安 {線}日）</td><td>在庫日数 ≧ 在庫過多とみなす日数</td></tr>
+  <tr><td>S03</td><td>注意</td><td>1箱を使い切るのに {値}日かかります。期限に注意です。</td><td>1箱消化日数 ≧ 1箱消化の注意日数</td></tr>
+  <tr><td>S04</td><td>情報</td><td>返品・廃棄・移動などで {値} 減っています。</td><td>その他の減少 &gt; 0</td></tr>
+  <tr><td>D01</td><td>情報</td><td>需要は安定しています。（平均 {値}日に1回）</td><td>需要の型＝安定</td></tr>
+  <tr><td>D02</td><td>情報</td><td>需要は量がばらつきます。（平均 {値}日に1回）</td><td>需要の型＝ばらつき大</td></tr>
+  <tr><td>D03</td><td>情報</td><td>需要は間欠的です。（平均 {値}日に1回）</td><td>需要の型＝間欠</td></tr>
+  <tr><td>D04</td><td>注意</td><td>需要はまばらで、出るときは大口です。（平均 {値}日に1回）</td><td>需要の型＝まばら・大口</td></tr>
+  <tr><td>D05</td><td>注意</td><td>予定にない払出だけの月が {値}ヶ月あります。（臨時・新患・他科）</td><td>予定外の月数 ≧ 1</td></tr>
+  <tr><td>P01</td><td>注意</td><td>予定より {値}% 多く出ています。（臨時・飛び処方・再来局）</td><td>ずれの割合 ≧ ずれの注意割合</td></tr>
+  <tr><td>P02</td><td>注意</td><td>予定より {値}% 少なく出ています。（処方終了・残薬調整）</td><td>ずれの割合 ≦ −ずれの注意割合</td></tr>
+  <tr><td>P03</td><td>情報</td><td>月ごとに予定と {値}% ずれます。</td><td>ずれの大きさ ≧ ずれの大きさの注意割合</td></tr>
+  <tr><td>E01</td><td>警告</td><td>経過措置品です。期限まで {値}日です。</td><td>経過措置期限が基準日以降</td></tr>
+  <tr><td>E02</td><td>警告</td><td>経過措置の期限を {値}日過ぎています。</td><td>経過措置期限が基準日より前</td></tr>
+  <tr><td>E03</td><td>警告</td><td>発注除外ですが、{値} 払い出されています。</td><td>発注除外、かつ払出合計 &gt; 0</td></tr>
+  <tr><td>Q01</td><td>情報</td><td>出納だけに出ます。予定に一度も出ていません。</td><td>出どころ＝出納だけ</td></tr>
+  <tr><td>Q02</td><td>注意</td><td>予定だけに出ます。出納と名前がずれている可能性があります。</td><td>出どころ＝予定だけ</td></tr>
+</table>
+
+<h3>⑪ T_判定理由　— 薬品×理由コード</h3>
+<table>
+  <tr><th style="width:24%">列</th><th style="width:12%">型</th><th>内容</th></tr>
+  <tr><td class="fk">薬品名</td><td>文字</td><td>→ M_薬品</td></tr>
+  <tr><td class="fk">コード</td><td>文字</td><td>→ M_理由コード</td></tr>
+  <tr><td>分類／種類／優先度</td><td>文字／文字／整数</td><td>M_理由コード から写したもの（ピボットで並べやすくするため）</td></tr>
+  <tr><td>文言</td><td>文字</td><td>{値}{線}{在庫} を数字に置き換えた完成文</td></tr>
+  <tr><td>値</td><td>数</td><td>その薬の数字（文言の {値}）</td></tr>
+  <tr><td>線</td><td>数</td><td>判定に使った設定の値（文言の {線}）</td></tr>
+</table>
+<p class="small">並び：優先度 → コード → 薬品名。最終の判定（J1～J4）はまだ入っていない。</p>
+
+<h2 class="pb">5. 接続のみの中間クエリ（参考）</h2>
+<p>データモデルには入らないが、⑥～⑨ の材料になる2つの表。列を知っておくと、クエリを直すときに見通しがよい。</p>
+
+<h3>③ 日次データ　— 薬品使用量分析データを行のまま読んだもの（fx_使用量読込 の出力）</h3>
+<table>
+  <tr><th style="width:26%">列</th><th>内容</th></tr>
+  <tr><td>日付</td><td>シート名「10月1日(水)」とファイル名の年月から</td></tr>
+  <tr><td>薬品区分</td><td>列「製剤」</td></tr>
+  <tr><td>略称</td><td>B列（表示用・正規化しない）</td></tr>
+  <tr><td>薬品名</td><td>fx_正規化 後</td></tr>
+  <tr><td>患者数／数量</td><td>列「患者数」「予定使用量」</td></tr>
+  <tr><td>在庫量／在庫量_発注残込み</td><td>列「在庫数量（発注残を含まない）」「在庫数量」</td></tr>
+  <tr><td>ファイル名／シート名</td><td>読んだ元</td></tr>
+</table>
+
+<h3>⑤ 出納　— 出納フォルダの月次ファイルを全期間つなげたもの</h3>
+<table>
+  <tr><th style="width:26%">列</th><th>内容</th></tr>
+  <tr><td>期間開始／期間終了／日数</td><td>ファイル名の8桁の日付2つから。同じ期間のファイルは更新日時が新しい1つだけ</td></tr>
+  <tr><td>製剤コード／製剤／コード</td><td>出納の列そのまま</td></tr>
+  <tr><td>品名</td><td>fx_正規化 後（＝薬品名）</td></tr>
+  <tr><td>品名の先頭空白</td><td>品名の前の空白の数</td></tr>
+  <tr><td>繰越数量／仕入数量／払出数量／在庫数量</td><td>出納の列。「合計」「小計」などの行は除く</td></tr>
+  <tr><td>その他の増減</td><td>在庫数量 −（繰越 ＋ 仕入 − 払出）</td></tr>
+  <tr><td>単位／棚番</td><td>出納の列そのまま</td></tr>
+  <tr><td>ファイル名</td><td>読んだ元</td></tr>
+</table>
+
+<div class="note">
+  <b>注意</b>：この資料は 0.1.2 のクエリ（src/*.m）から起こしたもの。クエリの列を変えたら、この資料も改定する（版を上げ、旧版は archive/docs/ に残す）。
+  Excel 上での動作確認はまだ行っていない。
+</div>
+</body>
+</html>
