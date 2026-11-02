@@ -6,6 +6,7 @@
   ・問題があれば終了コード 1
 """
 import re, sys
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # cp932 コンソールでも ⓪ などを表示できるように
 src = open(sys.argv[1], encoding="utf-8").read().replace("\r\n", "\n")
 parts = re.split(r"// =+\n// (.+?クエリ名：[^\n]*)\n", src)
 def strip(code):

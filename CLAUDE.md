@@ -4,7 +4,7 @@ Excel Power Query (M) tools for pharmacy operations. One subfolder per project; 
 
 ## Runtime constraints
 - Windows Excel (M365) Power Query only. **No VBA/macros, no external servers/DBs/add-ins.**
-- Deployment = user opens a .txt and pastes each query into the Advanced Editor. Deliverable is one paste-ready `.txt` (UTF-8, CRLF) per project, built from `.m` sources.
+- Deployment = user opens a .txt and pastes each query into the Advanced Editor. Deliverable is one paste-ready `.txt` (UTF-8, CRLF) per project, built from `.m` sources (a project may add a second `.txt` for one-time setup queries, e.g. hand-entered tables, from its own manifest).
 - Inputs are .xls/.xlsx exports from the pharmacy system (エリシアS). Legacy .xls quirks to always handle:
   - `Excel.Workbook` nav table may lack the `Kind` column
   - sheet names may carry `'` and a trailing `$`; defined names (`Print_Area`, `_xlnm`, names with inner `$`) appear as rows

@@ -16,7 +16,7 @@ Psychiatric-clinic-adjacent pharmacy (tablets only). Keep the stock that avoids 
 - 予定とのずれ = 払出 − 予定; can be + (ad-hoc, new, re-visits, dose up) or − (discontinued, leftover adjustment, no-show). Monthly sums cancel within a month (treat magnitude as a lower bound).
 - Drugs unmoved since before the oldest loaded 出納 month appear nowhere (needs a full stock list once).
 - No YJ code in any export. Key = normalized drug name (出納: 品名). 略称 (column B) is display-only.
-- 出納 file: `yyyymmdd_yyyymmdd_数量一覧.xls`, one sheet, header row 1, 10 fixed columns. Analysis-data file: prefix `薬品使用量`, daily sheets `10月1日(水)`, header row 1 merged with blank row 2.
+- 出納 file: `yyyymmdd_yyyymmdd_数量一覧.xls`, one sheet, 10 fixed columns. Header row = the row containing 品名; rows above it may carry 出力日/期間. Period = first in-file date pair (前 ≦ 後) above the header, else the two 8-digit numbers in the file name. Real-file layout above the header is not yet confirmed with a sample. Analysis-data file: prefix `薬品使用量`, daily sheets `10月1日(水)`, header row 1 merged with blank row 2.
 
 ## Tables (data model)
 | Table | Grain | Keys |
@@ -31,6 +31,11 @@ Psychiatric-clinic-adjacent pharmacy (tablets only). Keep the stock that avoids 
 Relationships: T_日次/T_月次 → M_日付, M_薬品; T_判定理由 → M_薬品, M_理由コード.
 - Compute everything in Power Query; **no DAX measures**. Pivots should only need sums/counts.
 - When adding a metric, document it in the header comment of `09_M_薬品.m`.
+
+## Build
+- `build.py` with no arguments builds both manifests: `manifest.txt` (main queries ⓪–⑪ → `dist/PowerPivot_ABC_<ver>.txt`) and `manifest_init.txt` (hand-entered tables → `dist/PowerPivot_初期テーブル作成_<ver>.txt`). Keep both VERSION lines equal.
+- Hand-entered table definitions (設定, 経過措置リスト, 発注除外, 在庫情報, 追加休業日, 薬品グループ) live in `src/init/` as `<A–F>_<table name>.m` with header mark `A`…`F` instead of a circled number, because the user deletes these queries after unlinking the tables; they are not part of the ⓪–⑪ sequence. Adding a column to one of them is a minor bump and must also be reflected in the table list of `src/_header.txt`.
+- `dist/*.txt` is committed (it is the deliverable); only the current version is kept there.
 
 ## Reason codes
 - Codes are permanent (never renumber/reuse; retire as 欠番). Prefixes: S stock/dead, D demand, P plan gap, E expiry/regulatory, Q data quality, J final verdict (not implemented).
