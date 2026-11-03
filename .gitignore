@@ -43,6 +43,8 @@ archive/references/*
 **/実データ/
 # テストの生成物
 **/tests/out/
+**/tests/out_clinic/
+**/bi/out/
 # Excel の一時ファイル
 ~$*
 # 貼り付け用 txt はリポジトリに含める（build.py の成果物）
