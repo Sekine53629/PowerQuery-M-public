@@ -19,8 +19,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "out")
 START, END = dt.date(2026, 4, 1), dt.date(2026, 9, 30)   # 実績・出納の期間（6か月）
 BASE_DATE = dt.date(2026, 10, 1)                          # 設定「発注日」（経過措置の基準日）
-TH = dict(不動とみなす月数=3, 在庫過多とみなす日数=60, 一箱消化の注意日数=180,
-          ずれの注意割合=0.3, ずれの大きさの注意割合=0.5, 標準の包装単位=100)
+TH = dict(不動とみなす月数=3, 在庫過多とみなす日数=60, ずれの注意割合=0.3, ずれの大きさの注意割合=0.5)
+RECENT_N = 3                                              # 設定「直近の月数」の初期値（直近の払出・在庫日数・S05）
 WD = "月火水木金土日"
 
 # 薬：名前・略称・型・1回あたりの量・処方の確率・実際/予定の倍率・臨時の確率
@@ -195,8 +195,8 @@ def main():
     expected(days, plan, mon, info, plan_name)
     with open(os.path.join(OUT, "設定の値.txt"), "w", encoding="utf-8") as f:
         f.write("分析用ブックの設定テーブルに入れる値（ほかは空欄＝初期値）\n"
-                f"フォルダパス\t{H}\n出納フォルダパス\t{S}\n開始日\t{START:%Y/%m/%d}\n終了日\t{END:%Y/%m/%d}\n"
-                f"発注日\t{BASE_DATE:%Y/%m/%d}\n\n経過措置リスト：\n")
+                f"フォルダパス\t{H}\n出納フォルダパス\t{S}\n"
+                f"発注日\t{BASE_DATE:%Y/%m/%d}\n（開始日・終了日は不要：発注日までの 1 年間を読む）\n\n経過措置リスト：\n")
         for n, d in TRANSITIONAL.items():
             f.write(f"{n}\t{d:%Y/%m/%d}\n")
     if "--xls" in sys.argv:
@@ -234,7 +234,8 @@ def expected(days, plan, mon, info, plan_name):
                              その他の増減=(r["その他の増減"] if moved else 0)))
         if not any(x["出納に載った"] for x in rows) and not any(x["予定数量"] for x in rows):
             continue
-        t_mon += [x for x in rows if x["出納に載った"] or x["予定数量"] or name in sui_names]
+        # T_月次 の行は「その月に出納に載った」か「その月に予定があった」薬だけ（⑦ と bi/model.py と同じ。動きも予定もない月は行なし）
+        t_mon += [x for x in rows if x["出納に載った"] or x["予定数量"]]
         q = [v[0] for v in tday.get(name, {}).values() if v[0] > 0]
         n = len(q)
         adi = day_n / n if n else None
@@ -244,6 +245,11 @@ def expected(days, plan, mon, info, plan_name):
         moved = [x for x in rows if x["出納に載った"]]
         out_sum = sum(x["払出数量"] for x in rows)
         per_day = out_sum / cal_days
+        # 直近 N ヶ月（設定「直近の月数」の初期値 3）：出納のある月の新しい方から
+        recent = months[-RECENT_N:]
+        rec_days = sum(month_end(m).day for m in recent)
+        rec_out = sum(x["払出数量"] for x in rows if x["月"] in recent)
+        rec_pd = rec_out / rec_days if rec_days else None
         last = max(moved, key=lambda x: x["月"]) if moved else None
         still = (latest.year - last["月"].year) * 12 + latest.month - last["月"].month if last else None
         stock = last["在庫数量"] if last else None
@@ -254,17 +260,18 @@ def expected(days, plan, mon, info, plan_name):
         less = sum(-x["その他の増減"] for x in rows if x["その他の増減"] < 0)
         src = "予定・出納" if n and moved else "予定だけ" if n else "出納だけ"
         trans = TRANSITIONAL.get(raw.get(name, ""))
-        d = dict(薬品名=name, 出どころ=src, 予定日数=n, 平均間隔=adi, CV2=cv2, 需要の型=typ, 動いた月数=len(moved),
+        d = dict(薬品名=name, 出どころ=src, 予定日数=(n if n else None), 平均間隔=adi, CV2=cv2, 需要の型=typ, 動いた月数=len(moved),
                  払出合計=out_sum, 一日平均払出=per_day, 最後に動いた月=last["月"] if last else None, 最終在庫=stock,
                  動きのない月数=still, 在庫日数=(stock / per_day if stock is not None and per_day > 0 else None),
-                 一箱消化日数=(TH["標準の包装単位"] / per_day if per_day > 0 else None),
                  その他の減少=less, ずれの割合=(gap_sum / plan_sum if plan_sum > 0 else None),
-                 ずれの大きさ=(abs_sum / plan_sum if plan_sum > 0 else None), 予定外の月数=extra_m, 経過措置期限=trans)
+                 ずれの大きさ=(abs_sum / plan_sum if plan_sum > 0 else None), 予定外の月数=extra_m, 経過措置期限=trans,
+                 直近の払出合計=rec_out,
+                 直近の在庫日数=(stock / rec_pd if stock is not None and rec_pd else None))
         m_drug.append(d)
         codes = []
         if (stock or 0) > 0 and still is not None and still >= TH["不動とみなす月数"]: codes.append("S01")
         if d["在庫日数"] is not None and d["在庫日数"] >= TH["在庫過多とみなす日数"]: codes.append("S02")
-        if d["一箱消化日数"] is not None and d["一箱消化日数"] >= TH["一箱消化の注意日数"]: codes.append("S03")
+        if d["直近の在庫日数"] is not None and d["直近の在庫日数"] >= TH["在庫過多とみなす日数"]: codes.append("S05")
         if less > 0: codes.append("S04")
         codes += {"安定": ["D01"], "ばらつき大": ["D02"], "間欠": ["D03"], "まばら・大口": ["D04"]}.get(typ, [])
         if extra_m >= 1: codes.append("D05")
@@ -285,8 +292,8 @@ def expected(days, plan, mon, info, plan_name):
             ws.append([r[c] for c in cols])
     ws = wb.create_sheet("説明")
     for t in ["M の定義どおりに Python で計算した期待値。Excel の結果と突き合わせる",
-              "・T_月次：Excel では出納のある月にすべての薬の行が出る（動かなかった月は払出0）。ここは主な行だけ",
-              "・M_薬品：列名の「一日」「一箱」「CV2」は、Excel では「1日」「1箱」「ばらつき（CV²）」",
+              "・T_月次：その月に出納に載ったか予定があった薬の行だけ（動きも予定もない月は行なし。⑦ と同じ）",
+              "・M_薬品：列名の「一日」「CV2」は、Excel では「1日」「ばらつき（CV²）」",
               "・祝日は無視して月～土を営業日にしている（テストデータの作り方の都合）",
               "・アリピプラゾールは実績の名前を「（旧）」付きにして、出納とずらしてある（Q01・Q02 の確認用）",
               "・スルピリドは全角の「５０ｍｇ」。fx_正規化 で半角になり、出納と一致すれば正しい"]:

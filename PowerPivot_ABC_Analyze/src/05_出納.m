@@ -8,6 +8,7 @@
 //             「前の日付 ≦ 後の日付」になる最初の組を期間とする）
 //        2. ファイル名：8桁の数字2つ（yyyymmdd_yyyymmdd_数量一覧.xls）
 //      期間が分からないファイルは読まない。同じ期間のファイルは更新日時が新しい1つだけ
+//    ・読む期間：① の開始日～終了日（発注日までの 1 年間）にかかるファイルだけ。それより古い月は読まない
 //    ・列（固定）：製剤コード／製剤／コード／品名／繰越数量／仕入数量／払出数量／在庫数量／単位／棚番
 //    ・出納に載るのは、その月に何かしら動いた薬だけ（動きのない薬は載らない）
 //    ・その他の増減 ＝ 在庫数量 －（繰越数量 ＋ 仕入数量 － 払出数量）
@@ -23,6 +24,8 @@ let
     FolderPath = if Prm[出納フォルダパス] = null then error "設定テーブルの「出納フォルダパス」が空欄です"
                  else Prm[出納フォルダパス],
     Mark       = Prm[出納の目印],
+    S0         = Date.From(Prm[開始日]),
+    E0         = Date.From(Prm[終了日]),
 
     // 列名の照合：表記をそろえ、空白・改行を除き、かっこを全角にそろえる
     Norm = (t as any) as text =>
@@ -108,7 +111,7 @@ let
                  Text.StartsWith(Text.Lower([Extension]), ".xls") and not Text.StartsWith([Name], "~$")
                  and Text.Contains(Nz([Name]), Mark)),
     WithP  = Table.AddColumn(Files, "期間", each PeriodInFile([Content]) ?? PeriodInName([Name])),
-    Valid  = Table.SelectRows(WithP, each [期間] <> null),
+    Valid  = Table.SelectRows(WithP, each [期間] <> null and [期間][終了] >= S0 and [期間][開始] <= E0),
     Keyed  = Table.AddColumn(Valid, "期間キー", each
                  Date.ToText([期間][開始], "yyyyMMdd") & "-" & Date.ToText([期間][終了], "yyyyMMdd"), type text),
     // 同じ期間のファイルは、更新日時が新しい1つだけ

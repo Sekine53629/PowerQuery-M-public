@@ -1020,10 +1020,10 @@ def write_init_tables(sim_start, sim_end, base_date):
     H, S = os.path.join(OUT, "export", "実績"), os.path.join(OUT, "export", "出納")
     wb = Workbook(); wb.remove(wb.active)
     ws = wb.create_sheet("設定"); ws.append(["項目", "値"])
-    for k, v in [("フォルダパス", H), ("開始日", sim_start.strftime("%Y/%m/%d")), ("終了日", sim_end.strftime("%Y/%m/%d")),
-                 ("出納フォルダパス", S), ("標準の包装単位", 100), ("年末年始の休み始め", "12/30"), ("年末年始の休み終わり", "1/4"),
+    # 開始日・終了日は書かない（0.3.0：発注日までの 1 年間を自動で読む。発注日 ＝ 期間の翌日なので、期間がそのまま対象になる）
+    for k, v in [("フォルダパス", H), ("出納フォルダパス", S), ("年末年始の休み始め", "12/30"), ("年末年始の休み終わり", "1/4"),
                  ("発注日", base_date.strftime("%Y/%m/%d")), ("不動とみなす月数", 3), ("在庫過多とみなす日数", 60),
-                 ("1箱消化の注意日数", 180), ("ずれの注意割合", 0.3), ("ずれの大きさの注意割合", 0.5),
+                 ("ずれの注意割合", 0.3), ("ずれの大きさの注意割合", 0.5),
                  ("期限切迫フォルダパス", os.path.join(OUT, "export", "システムリスト", "期限切れ")),
                  ("経過措置フォルダパス", os.path.join(OUT, "export", "システムリスト", "経過措置薬品")),
                  ("不動品フォルダパス", os.path.join(OUT, "export", "システムリスト", "不動薬"))]:
@@ -1034,9 +1034,9 @@ def write_init_tables(sim_start, sim_end, base_date):
     ws = wb.create_sheet("発注除外"); ws.append(["薬品名", "理由", "登録日"])
     for n, why in NO_ORDER.items():
         ws.append([n, why, sim_start.strftime("%Y/%m/%d")])
-    ws = wb.create_sheet("在庫情報"); ws.append(["薬品名", "包装単位", "列数"])
+    ws = wb.create_sheet("在庫情報"); ws.append(["薬品名", "列数"])
     for x in DRUGS:
-        ws.append([x["name"], x["pack"], 10])
+        ws.append([x["name"], 10])
     ws = wb.create_sheet("追加休業日"); ws.append(["日付", "理由"])
     ws = wb.create_sheet("薬品グループ"); ws.append(["薬品名", "成分規格", "需要のまとまり", "先発後発"])
     for x in DRUGS:

@@ -39,6 +39,7 @@ Excel Power Query (M) tools for pharmacy operations. One subfolder per project; 
 - Column-name matching: normalize with `fx_正規化`, strip spaces/newlines, unify parentheses to full-width.
 - Drug names pass through `fx_正規化` (full-width ASCII→half, half-width kana→full). Keep 略称 raw (display only).
 - Don't use reserved words as identifiers. Japanese identifiers are fine. In nested `each`, name the outer row with `(r) =>`.
+- Identifiers (including record field names) may only use letters/digits/underscore (Japanese letters included); any other character such as `・` `（` `）` `／` must be quoted as `#"…"` — Excel parses the query as invalid otherwise (saved as `#!"…"`, evaluates to 「名前 'Source' を認識できません」). `_tools/mcheck.py` flags this as IDENT?.
 - Use `Table.Buffer`/`List.Buffer` for reused lookups; avoid per-row `Table.SelectRows` over large tables.
 - `Table.FromRecords` types: use `nullable`; apply `Int64.Type`/`Percentage.Type` afterwards via `Table.TransformColumnTypes`.
 - Only raise errors for missing required settings, with an actionable Japanese message.
@@ -51,7 +52,7 @@ Excel Power Query (M) tools for pharmacy operations. One subfolder per project; 
 - Author name on documents: 関根禎浩.
 
 ## Verification
-1. `python build.py` → `problems: 0`.
-2. `python tests/make_testdata.py --xls`, paste into Excel, Refresh All, compare with `tests/out/期待値.xlsx`.
+1. `python build.py` → `problems: 0` (mcheck checks bracket balance, top-level let bindings and identifier characters — not semantics).
+2. `python tests/make_testdata.py --xls`, paste into Excel, Refresh All, compare with `tests/out/期待値.xlsx` (a project may automate this, e.g. PowerPivot_ABC_Analyze `tools/` + `tests/compare_excel.py`; dev PC only).
 3. Passing the syntax check ≠ working. Say "not yet verified in Excel" until it is.
 4. Replies and docs for the user are in Japanese.

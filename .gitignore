@@ -49,3 +49,4 @@ archive/references/*
 ~$*
 # 貼り付け用 txt はリポジトリに含める（build.py の成果物）
 !**/dist/
+**/tests/out_excel/

@@ -5,8 +5,8 @@
 //    ・前月：出納のある月の並びで1つ前
 //    ・G01：構成比が前月から設定「出荷調整の構成比の変化」以上動き、まとまり全体の払出の変化が
 //           設定「出荷調整の合計の許容」以内（＝需要は変わらないのに屋号が入れ替わった）
-//    ・G02：仕入 0 が2ヶ月続き、当月の払出 ≧ 包装単位、当月の在庫 < 当月の払出
-//           （月に1箱未満しか出ない薬は除く：箱単位の発注では仕入 0 の月が普通にある）
+//    ・G02：仕入 0 が2ヶ月続き、当月の払出 ≧ 設定「極小需要の月の払出」、当月の在庫 < 当月の払出
+//           （ほとんど出ない薬は除く：箱単位の発注では仕入 0 の月が普通にある）
 //    ・理由：G01・G02 の文言（数字入り）
 // ================================================================================
 let
@@ -16,14 +16,14 @@ let
                in  if v = null or (v is text and Text.Trim(v) = "") then dflt else Number.From(v),
     PT      = Num("出荷調整の構成比の変化", 0.3),
     TOL     = Num("出荷調整の合計の許容", 0.3),
-    StdPack = Num("標準の包装単位", 100),
+    TinyOut = Num("極小需要の月の払出", 100),
     F       = (n as nullable number) as text => if n = null then "" else Number.ToText(Number.Round(n, 0), "N0", "ja-JP"),
     Signed  = (n as number) as text => (if n >= 0 then "+" else "") & Text.From(Number.Round(n, 0)),
 
     Mon    = Table.SelectRows(#"T_月次", each [出納データあり]),
-    Drugs  = Table.Buffer(Table.SelectColumns(#"M_薬品", {"薬品名", "需要のまとまり", "包装単位"})),
+    Drugs  = Table.Buffer(Table.SelectColumns(#"M_薬品", {"薬品名", "需要のまとまり"})),
     J0     = Table.ExpandTableColumn(
-                 Table.NestedJoin(Mon, {"薬品名"}, Drugs, {"薬品名"}, "g", JoinKind.LeftOuter), "g", {"需要のまとまり", "包装単位"}),
+                 Table.NestedJoin(Mon, {"薬品名"}, Drugs, {"薬品名"}, "g", JoinKind.LeftOuter), "g", {"需要のまとまり"}),
     Rows   = Table.SelectRows(J0, each [需要のまとまり] <> null),
 
     // 屋号が2つ以上あるまとまりだけ
@@ -34,8 +34,7 @@ let
     Base   = Table.Group(R2, {"需要のまとまり", "月", "薬品名"}, {
                  {"払出",     each List.Sum([払出数量]) ?? 0, type number},
                  {"仕入",     each List.Sum([仕入数量]) ?? 0, type number},
-                 {"在庫",     each List.Max([在庫数量]), type nullable number},
-                 {"包装単位", each List.Max([包装単位]), type nullable number}}),
+                 {"在庫",     each List.Max([在庫数量]), type nullable number}}),
     Tot    = Table.Group(Base, {"需要のまとまり", "月"}, {{"まとまりの払出", each List.Sum([払出]) ?? 0, type number}}),
     WithT  = Table.ExpandTableColumn(
                  Table.NestedJoin(Base, {"需要のまとまり", "月"}, Tot, {"需要のまとまり", "月"}, "t", JoinKind.LeftOuter),
@@ -62,9 +61,8 @@ let
             chg   = if [前月の構成比] = null then null else [構成比] - [前月の構成比],
             totCh = if [まとまりの払出_前月] = null or [まとまりの払出_前月] = 0 then null
                     else ([まとまりの払出] - [まとまりの払出_前月]) / [まとまりの払出_前月],
-            pack  = if [包装単位] = null or [包装単位] <= 0 then StdPack else [包装単位],
             g01   = chg <> null and totCh <> null and Number.Abs(chg) >= PT and Number.Abs(totCh) <= TOL,
-            g02   = [仕入] = 0 and ([前月の仕入] ?? 0) = 0 and [払出] >= pack and ([前月の払出] ?? 0) > 0
+            g02   = [仕入] = 0 and ([前月の仕入] ?? 0) = 0 and [払出] >= TinyOut and ([前月の払出] ?? 0) > 0
                     and [在庫] <> null and [在庫] < [払出],
             why   = if g01 then "構成比が " & Signed(chg * 100) & " ポイント動きました（まとまり全体は " & Signed(totCh * 100) & "%）"
                     else if g02 then "仕入がないまま払出が続き、在庫 " & F([在庫]) & "（月の払出 " & F([払出]) & "）"

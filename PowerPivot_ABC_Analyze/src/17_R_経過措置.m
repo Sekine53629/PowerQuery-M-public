@@ -44,13 +44,13 @@ let
                       else "使い切れる見込み。発注量を残り日数分に抑える",
             act     = if [代替の屋号] = null then act0 else act0 & "／代替は「" & [代替の屋号] & "」。在庫がなくなるまで管理を継続"
         in
-            [残り日数 = left, 期限切迫 = left <= Near, 在庫 = stock, 期限までに使い切れる量 = usable, 余る量 = surplus, 処置の案 = act]),
+            [残り日数 = left, 期限切迫 = if left <= Near then "○" else "", 在庫 = stock, 期限までに使い切れる量 = usable, 余る量 = surplus, 処置の案 = act]),
     E     = Table.ExpandRecordColumn(Calc, "計算", {"残り日数", "期限切迫", "在庫", "期限までに使い切れる量", "余る量", "処置の案"}),
     Out   = Table.SelectColumns(E, {"薬品名", "略称", "需要のまとまり", "経過措置期限", "残り日数", "期限切迫", "在庫", "1日平均払出",
                 "期限までに使い切れる量", "余る量", "代替の屋号", "処置の案"}),
     Typed = Table.TransformColumnTypes(Out, {
                 {"薬品名", type text}, {"略称", type text}, {"需要のまとまり", type text}, {"経過措置期限", type date},
-                {"残り日数", Int64.Type}, {"期限切迫", type logical}, {"在庫", type number}, {"1日平均払出", type number},
+                {"残り日数", Int64.Type}, {"期限切迫", type text}, {"在庫", type number}, {"1日平均払出", type number},
                 {"期限までに使い切れる量", type number}, {"余る量", type number}, {"代替の屋号", type text}, {"処置の案", type text}}),
     Result = Table.Sort(Typed, {{"残り日数", Order.Ascending}, {"薬品名", Order.Ascending}})
 in

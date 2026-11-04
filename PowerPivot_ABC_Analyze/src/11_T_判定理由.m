@@ -13,7 +13,6 @@ let
                in  if v = null or (v is text and Text.Trim(v) = "") then dflt else Number.From(v),
     StillMonths = Num("不動とみなす月数", 3),
     OverDays    = Num("在庫過多とみなす日数", 60),
-    BoxDays     = Num("1箱消化の注意日数", 180),
     GapRate     = Num("ずれの注意割合", 0.3),
     GapSize     = Num("ずれの大きさの注意割合", 0.5),
     BaseDate    = Prm[発注日],
@@ -27,7 +26,6 @@ let
             stock = r[最終在庫] ?? 0,
             still = r[動きのない月数],
             days  = r[在庫日数],
-            box   = r[#"1箱消化日数"],
             less  = r[その他の減少] ?? 0,
             adi   = r[平均間隔],
             typ   = r[需要の型],
@@ -44,7 +42,6 @@ let
                 if days <> null and days >= OverDays then {"S02", days, OverDays} else null,
                 if rdays <> null and rdays >= OverDays then {"S05", rdays, OverDays} else null,
                 if r[不動品リスト] = true then {"S06", r[システム不動日数], null} else null,
-                if box <> null and box >= BoxDays then {"S03", box, BoxDays} else null,
                 if less > 0 then {"S04", less, null} else null,
                 if typ = "安定" then {"D01", adi, null}
                 else if typ = "ばらつき大" then {"D02", adi, null}

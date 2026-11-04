@@ -67,7 +67,7 @@ def r1_abc(model, settings, abc_m):
         rows.append(dict(需要のまとまり=k, 薬品名=r["薬品名"], 略称=r["略称"], 先発後発=r["先発後発"],
                          直近の払出=now["払出"], 構成比=now["構成比"], 累積=now["累積"], 今月の区分=now["区分"], 前月の区分=before,
                          変更=("" if before in (None, now["区分"]) else f"{before}→{now['区分']}"),
-                         **{"1箱消化日数": r["1箱消化日数"]}, 在庫日数=r["在庫日数"], 需要の型=r["需要の型"], 最終在庫=r["最終在庫"]))
+                         在庫日数=r["在庫日数"], 需要の型=r["需要の型"], 最終在庫=r["最終在庫"]))
     out = pd.DataFrame(rows)
     return out.sort_values(["累積", "需要のまとまり", "薬品名"]).reset_index(drop=True)
 
@@ -75,7 +75,7 @@ def r1_abc(model, settings, abc_m):
 def r2_dead(model, settings):
     d, rs = model.M_薬品, model.T_判定理由
     horizon = settings.num("当面の予定日数")
-    s_codes = rs[rs["コード"].isin(["S01", "S02", "S03", "S05", "S06"])]
+    s_codes = rs[rs["コード"].isin(["S01", "S02", "S05", "S06"])]
     if s_codes.empty:
         return pd.DataFrame()
     msgs = s_codes.groupby("薬品名")["文言"].apply(lambda x: "／".join(x))
@@ -83,12 +83,10 @@ def r2_dead(model, settings):
     for _, r in d[d["薬品名"].isin(msgs.index)].iterrows():
         per_day = r["直近の1日平均払出"] if not pd.isna(r["直近の1日平均払出"]) else 0.0
         stock = r["最終在庫"] if not pd.isna(r["最終在庫"]) else 0.0
-        pack = r["包装単位"] if not pd.isna(r["包装単位"]) and r["包装単位"] > 0 else settings.num("標準の包装単位")
         surplus = max(0.0, stock - per_day * horizon)
         rows.append(dict(薬品名=r["薬品名"], 略称=r["略称"], 棚番=r["棚番"], 最終在庫=stock, 最後に動いた月=r["最後に動いた月"],
                          動きのない月数=r["動きのない月数"], 在庫日数=r["在庫日数"], 直近の在庫日数=r["直近の在庫日数"],
-                         **{"1箱消化日数": r["1箱消化日数"], "直近の1日平均払出": per_day},
-                         余った量=surplus, 返品できる箱数=math.floor(surplus / pack) if pack else None,
+                         **{"直近の1日平均払出": per_day}, 余った量=surplus,
                          需要のまとまり=r["需要のまとまり"], 警告=msgs[r["薬品名"]]))
     return pd.DataFrame(rows).sort_values(["動きのない月数", "在庫日数"], ascending=[False, False], na_position="last").reset_index(drop=True)
 
@@ -139,13 +137,13 @@ def r4_shortage(model, settings):
                                      前月の構成比=share.loc[m0, n], 当月の構成比=share.loc[m1, n], 変化=delta,
                                      まとまりの払出_前月=tot[m0], まとまりの払出_当月=tot[m1],
                                      理由=f"構成比が {round(delta*100):+d} ポイント動きました（まとまり全体は {round(tot_change*100):+d}%）"))
-    # G02：仕入 0 が 2 ヶ月以上続き、払出があり、在庫が月の払出を下回った（月に 1 箱未満の薬は除く：箱単位の発注なら仕入 0 の月は普通）
-    pack_of = dict(zip(d["薬品名"], d["包装単位"].fillna(settings.num("標準の包装単位"))))
+    # G02：仕入 0 が 2 ヶ月以上続き、払出があり、在庫が月の払出を下回った（ほとんど出ない薬は除く：箱単位の発注なら仕入 0 の月は普通）
+    tiny_out = settings.num("極小需要の月の払出")
     for n, g in tt.sort_values("月").groupby("薬品名"):
         g = g.reset_index(drop=True)
         for i in range(1, len(g)):
             a, b = g.loc[i - 1], g.loc[i]
-            if (a["仕入数量"] or 0) == 0 and (b["仕入数量"] or 0) == 0 and (b["払出数量"] or 0) >= pack_of.get(n, 100) and (a["払出数量"] or 0) > 0 \
+            if (a["仕入数量"] or 0) == 0 and (b["仕入数量"] or 0) == 0 and (b["払出数量"] or 0) >= tiny_out and (a["払出数量"] or 0) > 0 \
                     and b["在庫数量"] is not None and not pd.isna(b["在庫数量"]) and b["在庫数量"] < b["払出数量"]:
                 rows.append(dict(需要のまとまり=cl.get(n), 薬品名=n, 月=b["月"], コード="G02", 前月の構成比=None, 当月の構成比=None, 変化=None,
                                  まとまりの払出_前月=None, まとまりの払出_当月=None,
@@ -206,8 +204,8 @@ def k1_stock_bins(model):
 
 def k2_quadrant(model, settings):
     d = model.M_薬品.copy()
-    box_d = settings.num("1箱消化の注意日数")
-    d["回転"] = d["直近の1箱消化日数"].map(lambda x: "払出なし" if pd.isna(x) else ("回らない" if x >= box_d else "回る"))
+    tiny_out = settings.num("極小需要の月の払出")
+    d["回転"] = d["直近の1日平均払出"].map(lambda x: "払出なし" if pd.isna(x) or x <= 0 else ("回る" if x * 30 >= tiny_out else "回らない"))
     d["型"] = d["需要の型"].fillna("予定なし")
     pv = d.pivot_table(index="型", columns="回転", values="薬品名", aggfunc="count").fillna(0).astype(int)
     pv2 = d.pivot_table(index="型", columns="回転", values="最終在庫", aggfunc="sum").fillna(0)
@@ -352,7 +350,7 @@ def build_dashboard(path, model, settings, R, K):
             f"<p class='note'>期間 {settings.start:%Y/%m/%d}～{settings.end:%Y/%m/%d}　基準日 {settings.base_date:%Y/%m/%d}　作成 {dt.datetime.now():%Y/%m/%d %H:%M}</p>",
             kpis, "<h2>K0 月次サマリー</h2>", "<div class='wrap'>" + df_html(k0, int_cols=("払出合計", "仕入合計", "ロス量", "在庫数量合計", "不動薬の在庫", "予定患者数合計")) + "</div>"]
     body += [f"<h2>{t}</h2>{p}" for (t, _), p in zip(figs, parts)]
-    body += ["<h2>K2 4 象限（需要の型 × 回転。回転は直近の 1 箱消化日数）：薬品数</h2>", df_html(k2n.reset_index()),
+    body += ["<h2>K2 4 象限（需要の型 × 回転。回転は直近の1日平均払出 × 30 が「極小需要の月の払出」以上）：薬品数</h2>", df_html(k2n.reset_index()),
              "<h2>K2 4 象限：最終在庫の合計</h2>", df_html(k2s.reset_index(), int_cols=tuple(k2s.columns)),
              "<h2>R1 ABC 区分表（直近 %d ヶ月の払出、まとまり単位）</h2>" % int(settings.num("ABCの月数")), "<div class='wrap'>" + df_html(R["R1"], n=60, pct=pct) + "</div>",
              "<h2>R2 不動薬の処理候補</h2>", "<div class='wrap'>" + df_html(R["R2"], n=60) + "</div>",
