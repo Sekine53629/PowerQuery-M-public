@@ -542,7 +542,9 @@ class Model:
     def _m_drug(self):
         S = self.s
         day, mon, sui = self.T_日次, self.T_月次, self.出納
-        names = sorted(set(day["薬品名"].dropna()) | set(mon["薬品名"].dropna()))
+        # 対象の薬：予定か出納に出た薬 ＋ 不動品リスト・経過措置薬品リストにだけ載る薬（⑨ と同じ。出納の期間より前から動いていない薬を拾う）
+        names = sorted(set(day["薬品名"].dropna()) | set(mon["薬品名"].dropna())
+                       | set(self.不動品リスト["薬品名"].dropna()) | set(self.経過措置該当["薬品名"].dropna()))
         base = pd.DataFrame({"薬品名": names})
         # 略称・製剤（予定）
         src = self.日次データ[["日付", "薬品名", "略称", "薬品区分"]]

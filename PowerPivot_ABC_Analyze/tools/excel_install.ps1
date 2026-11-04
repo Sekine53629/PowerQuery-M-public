@@ -20,6 +20,10 @@ param(
     [string]$Folder,
     [string]$SuiFolder,
     [string]$OrderDate,
+    [string]$KigenFolder,       # 期限切迫フォルダパス（期限切れリスト）
+    [string]$KeikaFolder,       # 経過措置フォルダパス（経過措置薬品リスト）
+    [string]$FudoFolder,        # 不動品フォルダパス（不動品リスト）
+    [switch]$SettingsOnly,      # 設定テーブルだけ書き換えて保存する（クエリ・接続は触らない）
     [string[]]$OnlyQueries      # 指定したクエリだけ書き換え、そのシートの表を更新して保存する（モデル・リレーションシップは触らない）
 )
 $ErrorActionPreference = "Stop"
@@ -60,16 +64,20 @@ try {
     $wb = $xl.Workbooks.Open((Resolve-Path $Book))     # Excel は相対パスを自分の作業フォルダで解決するので絶対パスにする
 
     # ---- 設定（渡された値だけ書き換える） ----
-    if ($Folder -or $SuiFolder -or $OrderDate) {
+    if ($Folder -or $SuiFolder -or $OrderDate -or $KigenFolder -or $KeikaFolder -or $FudoFolder) {
         $lo = $wb.Worksheets.Item("設定").ListObjects.Item("設定")
         for ($i = 1; $i -le $lo.ListRows.Count; $i++) {
             $r = $lo.ListRows.Item($i).Range; $k = [string]$r.Cells.Item(1, 1).Value2; $c = $r.Cells.Item(1, 2)
             if ($k -eq "フォルダパス" -and $Folder) { $c.Value2 = $Folder }
             if ($k -eq "出納フォルダパス" -and $SuiFolder) { $c.Value2 = $SuiFolder }
             if ($k -eq "発注日" -and $OrderDate) { $c.Formula = ""; try { $c.NumberFormatLocal = "yyyy/mm/dd" } catch {}; $c.Value2 = [DateTime]$OrderDate }
+            if ($k -eq "期限切迫フォルダパス" -and $KigenFolder) { $c.Value2 = $KigenFolder }
+            if ($k -eq "経過措置フォルダパス" -and $KeikaFolder) { $c.Value2 = $KeikaFolder }
+            if ($k -eq "不動品フォルダパス" -and $FudoFolder) { $c.Value2 = $FudoFolder }
         }
         Write-Host "設定を書き換えた"
     }
+    if ($SettingsOnly) { $wb.Save(); $wb.Close($false); Write-Host "保存しました（-SettingsOnly）"; return }
 
     # ---- クエリ ----
     $have = @{}; foreach ($q in $wb.Queries) { $have[$q.Name] = $true }

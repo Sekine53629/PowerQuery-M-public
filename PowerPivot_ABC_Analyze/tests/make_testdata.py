@@ -3,6 +3,10 @@
   出力：tests/out/
     実績/薬品使用量分析データ2026MM.xlsx   … 薬品使用量分析データ（日ごとのシート）
     出納/2026MM01_2026MMDD_数量一覧.xlsx   … 出納の月次（その月に動いた薬だけ）
+    システムリスト/経過措置薬品/経過措置薬品リスト.xlsx      … エリシアSの 3 リスト（⑳ ⑭ ㉑ が読む）
+    システムリスト/期限切れ/YYYYMMDD_期限切れリスト.xlsx
+    システムリスト/不動薬/YYYYMM_不動品リスト.xlsx
+    手入力テーブル.xlsx                    … 設定ほか（bi/run.py --tables に渡せる。Excel に貼る値も同じ）
     期待値.xlsx                            … T_月次・M_薬品（主な指標）・T_判定理由の正解
     設定の値.txt                           … 分析用ブックの設定テーブルに入れる値
   LibreOffice（soffice）があれば、.xls も作る（--xls）。実物は .xls なので、本番前は .xls でも試す
@@ -40,7 +44,14 @@ DRUGS = [
     ("アリピプラゾール錠3mg",        "ｱﾘﾋﾟﾌﾟﾗ3",   "planonly", 28, 0.40, 1.00, 0.00),
     ("スルピリド錠５０ｍｇ",          "ｽﾙﾋﾟﾘﾄﾞ50",  "regular",  28, 0.40, 0.95, 0.05),
 ]
-TRANSITIONAL = {"ハロペリドール錠0.75mg「アメル」": dt.date(2027, 3, 31)}   # 経過措置リスト
+TRANSITIONAL = {"ハロペリドール錠0.75mg「アメル」": dt.date(2027, 3, 31)}   # 手入力の経過措置リスト
+# エリシアSの経過措置薬品リストにだけある薬（期限切れ → E02）。⑨ はリストを手入力より優先する
+LIST_TRANS = {"クロキサゾラム錠1mg": dt.date(2026, 9, 30)}
+ALL_TRANS = {**TRANSITIONAL, **LIST_TRANS}
+# 不動品リストにだけ載る薬（出納にも予定にも一度も出ない → ⑨ で拾われ、S06・Q01 になる）
+FUDO_ONLY = ("ペロスピロン錠4mg", "ﾍﾟﾛｽﾋﾟﾛﾝ4", 50)              # 名前・略称・在庫
+MARKED = {"ハロペリドール錠0.75mg「アメル」": "劇", "リチウム炭酸塩錠200mg": "劇"}   # リストの品名の先頭に付く記号（ない薬は空白 3 つ）
+LIST_DIR = os.path.join(OUT, "システムリスト")
 
 
 def open_day(d):
@@ -138,6 +149,121 @@ def write_xlsx(path, sheets):
     wb.save(path)
 
 
+HDR_KEIKA = ["記号", "製剤コード", "製剤", "コード", "品名", "メーカーコード", "メーカー", "経過措置", "在庫数量", "単位"]
+HDR_KIGEN = ["記号", "製剤コード", "製剤", "コード", "品名", "メーカーコード", "メーカー", "棚番", "伝票日付", "No", "伝票区分コード", "伝票区分",
+             "仕入先コード", "仕入先", "包装", "仕入数量", "単価", "期限", "期限切れ数量", "単位", "期限切れ金額", "ロット番号", "伝票備考",
+             "連携ｺｰﾄﾞ", "連番", "品目備考"]
+HDR_FUDO = ["記号", "製剤コード", "製剤", "コード", "品名", "メーカーコード", "メーカー", "棚番", "仕入伝票日付", "仕入区分コード", "仕入区分",
+            "仕入先コード", "仕入先", "包装", "購入価", "仕入数量", "仕入金額", "期限日", "最終払出日", "払出区分", "払出区分コード", "払出先コード",
+            "払出数量", "払出先", "単価", "数量", "単位", "金額", "薬価", "薬価金額", "連携コード", "連番", "品目備考", "ロット番号", "伝票備考",
+            "基準日", "最終使用日", "不動日数", "YJコード", "出力日時", "JANコード", "レセプト電算コード"]
+
+
+def fmt_num(x):
+    return int(x) if float(x).is_integer() else x
+
+
+def marked(n):
+    """リストの品名：先頭に「劇 」などの記号、ない薬は空白 3 つ（実物と同じ。クエリが外して照合する）"""
+    m = MARKED.get(n)
+    return (m + " " if m else "   ") + n
+
+
+def write_system_lists(mon, actual):
+    """エリシアSの 3 リストを tests/out/システムリスト/<種類>/ に書く。ロットは在庫から決まった乱数で分ける
+    戻り値：{薬品名: 不動日数 or None}（不動品リストに載せた薬）"""
+    rnd = random.Random(SEED + 9)
+    dirs = {k: os.path.join(LIST_DIR, k) for k in ("経過措置薬品", "期限切れ", "不動薬")}
+    for d in dirs.values():
+        os.makedirs(d, exist_ok=True)
+    last_month = list(month_iter())[-1]
+    stock = {n: mon[(last_month, n)]["在庫数量"] for n, *_ in DRUGS}
+    stock[FUDO_ONLY[0]] = FUDO_ONLY[2]
+    abbr = {n: ab for n, ab, *_ in DRUGS}; abbr[FUDO_ONLY[0]] = FUDO_ONLY[1]
+    shelf = {n: f"{i + 1:03d}" for i, (n, *_) in enumerate(DRUGS)}; shelf[FUDO_ONLY[0]] = "099"
+    last_out = {}
+    for (d, n), q in actual.items():
+        if q > 0 and (n not in last_out or d > last_out[n]):
+            last_out[n] = d
+    price = {n: round(rnd.uniform(5, 120), 1) for n in stock}
+    yj = {n: f"{rnd.randint(1124, 1179)}0{rnd.randint(10, 99)}F{rnd.randint(1, 9)}{rnd.randint(100, 999)}" for n in stock}
+    jan = {n: "49" + "".join(str(rnd.randint(0, 9)) for _ in range(11)) for n in stock}
+    ws = [("ｱﾙﾌ", "アルフレッサ"), ("ｽｽﾞｹﾝ", "スズケン")]
+    # ロット：在庫を 1～2 本に分ける。期限は基準日から 60～900 日
+    lots = {}
+    for n, st in stock.items():
+        if not st or st <= 0:
+            continue
+        st = int(st)
+        qs = [st] if st < 150 or rnd.random() < 0.4 else (lambda c: [c, st - c])(rnd.randint(1, st - 1))
+        lots[n] = [dict(ロット=f"{rnd.choice('ABCDEFG')}{rnd.randint(1000, 9999)}", 数量=q,
+                        期限=BASE_DATE + dt.timedelta(days=rnd.randint(60, 900)),
+                        仕入日=BASE_DATE - dt.timedelta(days=rnd.randint(10, 400)), 仕入先=rnd.choice(ws)) for q in qs]
+
+    def mk(n):
+        return [1, "内服", abbr[n][:6], marked(n), "00000", None]
+
+    # ---- 経過措置薬品リスト：手入力と同じ薬 ＋ 期限切れの薬 ----
+    rows = [HDR_KEIKA]
+    for n, lim in ALL_TRANS.items():
+        st = stock.get(n) or 0
+        rows.append(["×" if st <= 0 else None] + mk(n)[:5] + [None, lim.strftime("%Y/%m/%d"), fmt_num(st), "錠"])
+    write_xlsx(os.path.join(dirs["経過措置薬品"], "経過措置薬品リスト.xlsx"), [("Sheet1", rows, False)])
+
+    # ---- 期限切れリスト：基準日から 180 日以内に期限が来るロット ----
+    rows = [HDR_KIGEN]; seq = 0
+    for n, ls in lots.items():
+        for l in ls:
+            if (l["期限"] - BASE_DATE).days <= 180:
+                seq += 1
+                rows.append([None, 1, "内服", abbr[n][:6], marked(n), "00000", None, shelf[n], l["仕入日"].strftime("%Y/%m/%d"), 1, 11, "仕入",
+                             l["仕入先"][0], l["仕入先"][1], None, fmt_num(l["数量"]), price[n], l["期限"].strftime("%Y/%m/%d"), fmt_num(l["数量"]),
+                             "錠", round(l["数量"] * price[n]), l["ロット"], f"{l['仕入先'][1]}（{price[n]}/{l['ロット']}）",
+                             f"5{l['仕入日'].year - 2018:02d}{l['仕入日'].month:02d}", seq, None])
+    write_xlsx(os.path.join(dirs["期限切れ"], f"{END:%Y%m%d}_期限切れリスト.xlsx"), [("Sheet1", rows, False)])
+
+    # ---- 不動品リスト：基準日の 90 日以上前から払出がない薬（一度も出ていない薬も）のロット ----
+    rows = [HDR_FUDO]; seq = 0; fudo = {}
+    for n, ls in lots.items():
+        lo = last_out.get(n)
+        idle = (BASE_DATE - lo).days if lo else None
+        if lo is not None and idle < 90:
+            continue
+        fudo[n] = idle
+        for l in ls:
+            seq += 1
+            rows.append([None, 1, "内服", abbr[n][:6], marked(n), "00000", None, shelf[n], l["仕入日"].strftime("%Y/%m/%d"), 11, "仕入",
+                         l["仕入先"][0], l["仕入先"][1], "100錠", price[n], fmt_num(l["数量"]), round(l["数量"] * price[n]),
+                         l["期限"].strftime("%Y/%m/%d"), lo.strftime("%Y/%m/%d") if lo else None, "払出" if lo else None, 21 if lo else None,
+                         1 if lo else None, fmt_num(l["数量"]) if lo else None, "処方" if lo else None, price[n], fmt_num(l["数量"]), "錠",
+                         round(l["数量"] * price[n]), price[n], round(l["数量"] * price[n]), f"5{l['仕入日'].year - 2018:02d}{l['仕入日'].month:02d}",
+                         seq, None, l["ロット"], f"{l['仕入先'][1]}（{price[n]}/{l['ロット']}）", BASE_DATE.strftime("%Y/%m/%d"),
+                         lo.strftime("%Y/%m/%d") if lo else None, idle, yj[n], BASE_DATE.strftime("%Y/%m/%d") + " 09:00:00", jan[n], 6 * 10**8 + seq])
+    write_xlsx(os.path.join(dirs["不動薬"], f"{END:%Y%m}_不動品リスト.xlsx"), [("Sheet1", rows, False)])
+    return fudo
+
+
+def write_hand_tables(H, S):
+    """手入力テーブル.xlsx（設定・経過措置リスト・発注除外・在庫情報・追加休業日・薬品グループ）。bi/run.py --tables に渡せる"""
+    wb = Workbook(); wb.remove(wb.active)
+    ws = wb.create_sheet("設定"); ws.append(["項目", "値"])
+    for k, v in [("フォルダパス", H), ("出納フォルダパス", S), ("発注日", BASE_DATE.strftime("%Y/%m/%d")),
+                 ("期限切迫フォルダパス", os.path.join(LIST_DIR, "期限切れ")), ("経過措置フォルダパス", os.path.join(LIST_DIR, "経過措置薬品")),
+                 ("不動品フォルダパス", os.path.join(LIST_DIR, "不動薬"))]:
+        ws.append([k, v])
+    ws = wb.create_sheet("経過措置リスト"); ws.append(["薬品名", "経過措置期限"])
+    for n, d in TRANSITIONAL.items():
+        ws.append([n, d.strftime("%Y/%m/%d")])
+    wb.create_sheet("発注除外").append(["薬品名", "理由", "登録日"])
+    wb.create_sheet("在庫情報").append(["薬品名", "列数", "使用期限"])
+    wb.create_sheet("追加休業日").append(["日付", "理由"])
+    wb.create_sheet("薬品グループ").append(["薬品名", "成分規格", "需要のまとまり", "先発後発", "供給状況"])
+    for w in wb:
+        for c in w[1]:
+            c.font = Font(bold=True)
+    wb.save(os.path.join(OUT, "手入力テーブル.xlsx"))
+
+
 def main():
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
@@ -192,11 +318,16 @@ def main():
             rows.append([1, "内用", ab[:6], nm, r["繰越数量"], r["仕入数量"], r["払出数量"], r["在庫数量"], "錠", f"{i + 1:03d}"])
         write_xlsx(os.path.join(S, f"{m:%Y%m%d}_{month_end(m):%Y%m%d}_数量一覧.xlsx"), [("Sheet1", rows, False)])
 
-    expected(days, plan, mon, info, plan_name)
+    fudo = write_system_lists(mon, actual)
+    write_hand_tables(H, S)
+    expected(days, plan, mon, info, plan_name, fudo)
     with open(os.path.join(OUT, "設定の値.txt"), "w", encoding="utf-8") as f:
         f.write("分析用ブックの設定テーブルに入れる値（ほかは空欄＝初期値）\n"
                 f"フォルダパス\t{H}\n出納フォルダパス\t{S}\n"
-                f"発注日\t{BASE_DATE:%Y/%m/%d}\n（開始日・終了日は不要：発注日までの 1 年間を読む）\n\n経過措置リスト：\n")
+                f"発注日\t{BASE_DATE:%Y/%m/%d}\n（開始日・終了日は不要：発注日までの 1 年間を読む）\n"
+                f"期限切迫フォルダパス\t{os.path.join(LIST_DIR, '期限切れ')}\n"
+                f"経過措置フォルダパス\t{os.path.join(LIST_DIR, '経過措置薬品')}\n"
+                f"不動品フォルダパス\t{os.path.join(LIST_DIR, '不動薬')}\n\n経過措置リスト：\n")
         for n, d in TRANSITIONAL.items():
             f.write(f"{n}\t{d:%Y/%m/%d}\n")
     if "--xls" in sys.argv:
@@ -204,8 +335,9 @@ def main():
     print("できた：", OUT)
 
 
-def expected(days, plan, mon, info, plan_name):
-    """M の定義どおりに期待値を計算する（T_月次・M_薬品の主な指標・T_判定理由）"""
+def expected(days, plan, mon, info, plan_name, fudo):
+    """M の定義どおりに期待値を計算する（T_月次・M_薬品の主な指標・T_判定理由）
+    fudo：不動品リストに載せた薬 {薬品名: 不動日数}（S06。出納にも予定にもない薬はここから M_薬品 に入る）"""
     # T_日次 相当
     tday = defaultdict(dict)
     for d, dd in plan.items():
@@ -217,7 +349,7 @@ def expected(days, plan, mon, info, plan_name):
     latest = months[-1]
     sui_names = {nz(n) for n, _, kind, *_ in DRUGS}
     names = sorted(set(tday) | {nz(n) for (m, n), r in mon.items()
-                                if r["仕入数量"] or r["払出数量"] or r["その他の増減"]})
+                                if r["仕入数量"] or r["払出数量"] or r["その他の増減"]} | {nz(n) for n in fudo})
     raw = {nz(n): n for n, *_ in DRUGS}
     t_mon, m_drug, reasons = [], [], []
     for name in names:
@@ -232,7 +364,8 @@ def expected(days, plan, mon, info, plan_name):
             rows.append(dict(月=m, 薬品名=name, 出納に載った=moved, 払出数量=out, 予定数量=pl, 予定とのずれ=gap,
                              ずれの割合=(gap / pl if pl > 0 else None), 在庫数量=r["在庫数量"] if moved else None,
                              その他の増減=(r["その他の増減"] if moved else 0)))
-        if not any(x["出納に載った"] for x in rows) and not any(x["予定数量"] for x in rows):
+        has_rows = any(x["出納に載った"] or x["予定数量"] for x in rows)     # T_月次 に行があるか（ないと出納の指標はすべて空欄）
+        if not has_rows and name not in fudo:
             continue
         # T_月次 の行は「その月に出納に載った」か「その月に予定があった」薬だけ（⑦ と bi/model.py と同じ。動きも予定もない月は行なし）
         t_mon += [x for x in rows if x["出納に載った"] or x["予定数量"]]
@@ -259,13 +392,15 @@ def expected(days, plan, mon, info, plan_name):
         extra_m = sum(1 for x in rows if x["予定数量"] == 0 and x["払出数量"] > 0)
         less = sum(-x["その他の増減"] for x in rows if x["その他の増減"] < 0)
         src = "予定・出納" if n and moved else "予定だけ" if n else "出納だけ"
-        trans = TRANSITIONAL.get(raw.get(name, ""))
-        d = dict(薬品名=name, 出どころ=src, 予定日数=(n if n else None), 平均間隔=adi, CV2=cv2, 需要の型=typ, 動いた月数=len(moved),
-                 払出合計=out_sum, 一日平均払出=per_day, 最後に動いた月=last["月"] if last else None, 最終在庫=stock,
+        trans = ALL_TRANS.get(raw.get(name, name))
+        d = dict(薬品名=name, 出どころ=src, 予定日数=(n if n else None), 平均間隔=adi, CV2=cv2, 需要の型=typ,
+                 動いた月数=len(moved) if has_rows else None,
+                 払出合計=out_sum if has_rows else None, 一日平均払出=per_day if has_rows else None,
+                 最後に動いた月=last["月"] if last else None, 最終在庫=stock,
                  動きのない月数=still, 在庫日数=(stock / per_day if stock is not None and per_day > 0 else None),
-                 その他の減少=less, ずれの割合=(gap_sum / plan_sum if plan_sum > 0 else None),
-                 ずれの大きさ=(abs_sum / plan_sum if plan_sum > 0 else None), 予定外の月数=extra_m, 経過措置期限=trans,
-                 直近の払出合計=rec_out,
+                 その他の減少=less if has_rows else None, ずれの割合=(gap_sum / plan_sum if plan_sum > 0 else None),
+                 ずれの大きさ=(abs_sum / plan_sum if plan_sum > 0 else None), 予定外の月数=extra_m if has_rows else None,
+                 経過措置期限=trans, 直近の払出合計=rec_out if has_rows else None,
                  直近の在庫日数=(stock / rec_pd if stock is not None and rec_pd else None))
         m_drug.append(d)
         codes = []
@@ -273,6 +408,7 @@ def expected(days, plan, mon, info, plan_name):
         if d["在庫日数"] is not None and d["在庫日数"] >= TH["在庫過多とみなす日数"]: codes.append("S02")
         if d["直近の在庫日数"] is not None and d["直近の在庫日数"] >= TH["在庫過多とみなす日数"]: codes.append("S05")
         if less > 0: codes.append("S04")
+        if raw.get(name, name) in fudo: codes.append("S06")
         codes += {"安定": ["D01"], "ばらつき大": ["D02"], "間欠": ["D03"], "まばら・大口": ["D04"]}.get(typ, [])
         if extra_m >= 1: codes.append("D05")
         gr, gs = d["ずれの割合"], d["ずれの大きさ"]
