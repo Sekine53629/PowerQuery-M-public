@@ -3,11 +3,15 @@
    出力：T_日次・T_月次・M_日付・M_薬品・M_理由コード・T_判定理由（列名・定義は M クエリ ⑤～⑪ に合わせる）
    ※ Power Pivot 側の結果と突き合わせるための「正解」役。定義を変えるときは M クエリと両方直す
 """
-import os, re, math, glob, unicodedata, datetime as dt
+import os, re, io, csv, math, glob, unicodedata, datetime as dt
 from collections import defaultdict
 import pandas as pd
 import numpy as np
 import openpyxl
+try:
+    import xlrd          # .xls（Excel 97-2003）を読むときだけ使う
+except ImportError:
+    xlrd = None
 
 # ------------------------------------------------------------------------------
 # 共通
@@ -142,6 +146,15 @@ class Settings:
         return float(v)
 
 
+def first_table(path, label):
+    """先頭 30 行に見出し label がある最初の表の行（なければ 1 枚目）。.xls はシートが名前の順に並ぶため（㉒ と同じ）"""
+    tables = open_tables(path)
+    for _, rows, _ in tables:
+        if any(norm_col(label) in [norm_col(c) for c in r] for r in rows[:30]):
+            return rows
+    return tables[0][1] if tables else []
+
+
 # ------------------------------------------------------------------------------
 # 薬品使用量予測データ（予定）：fx_使用量読込 ＋ ③ 日次データ
 # ------------------------------------------------------------------------------
@@ -154,61 +167,147 @@ def _sheet_rows(ws):
     return [list(r) for r in ws.iter_rows(values_only=True)]
 
 
+# ------------------------------------------------------------------------------
+# ファイルを開く：㉒ fx_ファイルを開く と同じ（.xls／.xlsx／.csv／.txt。形式は中身で見分ける）
+# ------------------------------------------------------------------------------
+SUPPORTED_EXT = (".xls", ".xlsx", ".xlsm", ".csv", ".txt", ".tsv")
+
+
+def list_files(folder):
+    """フォルダの中の、読める形式のファイル（Excel の一時ファイル「~$…」を除く）"""
+    if not folder or not os.path.isdir(folder):
+        return []
+    return [os.path.join(folder, f) for f in sorted(os.listdir(folder))
+            if os.path.splitext(f)[1].lower() in SUPPORTED_EXT and not f.startswith("~$")
+            and os.path.isfile(os.path.join(folder, f))]
+
+
+def open_tables(path):
+    """戻り値：[(シート名, 行のリスト, 形式)]。文字のファイルは 1 つだけ（シート名は空、値はすべて文字、空欄は None）"""
+    name = os.path.basename(path)
+    with open(path, "rb") as f:
+        data = f.read()
+    if not data:
+        raise ValueError(f"「{name}」は空のファイルです")
+    if data[:4] == b"\xD0\xCF\x11\xE0":                      # Excel 97-2003（.xls）
+        if xlrd is None:
+            raise ValueError(f"「{name}」：.xls を読むには xlrd が必要です（pip install xlrd）")
+        wb = xlrd.open_workbook(file_contents=data)
+        out = []
+        for sh in wb.sheets():
+            rows = []
+            for i in range(sh.nrows):
+                r = []
+                for c in sh.row(i):
+                    if c.ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK) or c.value == "":
+                        r.append(None)
+                    elif c.ctype == xlrd.XL_CELL_DATE:
+                        r.append(xlrd.xldate_as_datetime(c.value, wb.datemode))
+                    elif c.ctype == xlrd.XL_CELL_NUMBER and float(c.value).is_integer():
+                        r.append(int(c.value))                # .xls の数値はすべて小数で返るので、整数は整数に戻す
+                    else:
+                        r.append(c.value)
+                rows.append(r)
+            out.append((sh.name, rows, "Excel（.xls）"))
+        return out
+    if data[:2] == b"PK":                                      # .xlsx
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        return [(ws.title, _sheet_rows(ws), "Excel（.xlsx）") for ws in wb.worksheets]
+    body = data[3:] if data[:3] == b"\xef\xbb\xbf" else data
+    if body[:1] == b"<":
+        raise ValueError(f"「{name}」は中身が HTML か XML です。Excel で開いて .xlsx か .csv で保存し直してください")
+    # 文字コード：BOM があればそれに従う。なければ UTF-8 として読んでみて、読めなければ Shift_JIS
+    if data[:3] == b"\xef\xbb\xbf":
+        enc, label = "utf-8-sig", "UTF-8"
+    elif data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        enc, label = "utf-16", "UTF-16"
+    else:
+        try:
+            data.decode("utf-8"); enc, label = "utf-8", "UTF-8"
+        except UnicodeDecodeError:
+            enc, label = "cp932", "Shift_JIS"
+    txt = data.decode(enc)
+    # 区切り：先頭 50 行（空行を除く）で、タブとカンマの多い方
+    head = [l for l in txt.splitlines() if l.strip() != ""][:50]
+    tabs, commas = sum(l.count("\t") for l in head), sum(l.count(",") for l in head)
+    delim = "\t" if tabs > 0 and tabs >= commas else ","
+    rows = [[(c if c != "" else None) for c in r] for r in csv.reader(io.StringIO(txt, newline=""), delimiter=delim)]
+    n = max((len(r) for r in rows), default=0)
+    rows = [r + [None] * (n - len(r)) for r in rows]
+    kind = f"文字（{'カンマ区切り' if delim == ',' else 'タブ区切り'}・{label}）"
+    return [("", rows, kind)]
+
+
+def _plan_parts(sheet, rows, kind, fy, fm, d8, start, end):
+    """1 枚の表を (日付, 行のリスト) に分ける。
+       Excel のシート：シート名「10月1日(水)」とファイルの年月から日付を決める
+       文字のファイル：見出しに「日付」の列があればその列で日ごとに分ける。なければファイル名の 8 桁の日付の 1 日分"""
+    if kind.startswith("文字"):
+        hidx = next((i for i, r in enumerate(rows[:30]) if norm_col(COLS["薬品名"]) in [norm_col(c) for c in r]), None)
+        hdr = [norm_col(c) for c in rows[hidx]] if hidx is not None else []
+        if "日付" in hdr:
+            di, groups = hdr.index("日付"), {}
+            for r in rows[hidx + 1:]:
+                d = to_date(r[di]) if di < len(r) else None
+                if d and start <= d <= end:
+                    groups.setdefault(d, [rows[hidx]]).append(r)
+            return list(groups.items())
+        return [(d8, rows)] if d8 and start <= d8 <= end else []
+    mm = re.match(r"\s*(\d{1,2})月(\d{1,2})日", sheet)
+    if not mm or sheet.startswith("期間"):
+        return []
+    mo, dd = int(mm.group(1)), int(mm.group(2))
+    if mo == fm:
+        y = fy
+    elif mo == (1 if fm == 12 else fm + 1):
+        y = fy + 1 if fm == 12 else fy
+    else:
+        return []
+    try:
+        d = dt.date(y, mo, dd)
+    except ValueError:
+        return []
+    return [(d, rows)] if start <= d <= end else []
+
+
 def load_plan(folder, start, end, prefix="薬品使用量"):
     """日次データ：日付／薬品区分／略称／薬品名／患者数／数量／在庫量／在庫量_発注残込み／ファイル名／シート名"""
-    files = [f for f in glob.glob(os.path.join(folder, "*.xls*"))
-             if os.path.basename(f).startswith(prefix) and not os.path.basename(f).startswith("~$")]
+    files = [f for f in list_files(folder) if os.path.basename(f).startswith(prefix)]
     recs = {}   # (date) -> (sortkey, rows)
     for f in sorted(files):
         name = os.path.basename(f)
-        m = re.search(r"(\d{4})(\d{2})", name)
-        if not m:
+        m = re.search(r"\d+", os.path.splitext(nz(name[len(prefix):]) or "")[0])     # 先頭の後ろで最初に出てくる数字の並び
+        if not m or len(m.group(0)) < 6:
             continue
-        fy, fm = int(m.group(1)), int(m.group(2))
+        dg = m.group(0)
+        fy, fm = int(dg[:4]), int(dg[4:6])
+        d8 = to_date(dg[:8]) if len(dg) >= 8 else None
         sortkey = (os.path.getmtime(f), name)
-        wb = openpyxl.load_workbook(f, read_only=True, data_only=True)
-        for ws in wb.worksheets:
-            s = ws.title
-            mm = re.match(r"\s*(\d{1,2})月(\d{1,2})日", s)
-            if not mm or s.startswith("期間"):
-                continue
-            mo, dd = int(mm.group(1)), int(mm.group(2))
-            if mo == fm:
-                y = fy
-            elif mo == (1 if fm == 12 else fm + 1):
-                y = fy + 1 if fm == 12 else fy
-            else:
-                continue
-            try:
-                d = dt.date(y, mo, dd)
-            except ValueError:
-                continue
-            if d < start or d > end:
-                continue
-            if d in recs and recs[d][0] > sortkey:
-                continue
-            rows = _sheet_rows(ws)
-            hidx = next((i for i, r in enumerate(rows) if norm_col(COLS["薬品名"]) in [norm_col(c) for c in r]), None)
-            if hidx is None:
-                continue
-            hdr = [norm_col(c) for c in rows[hidx]]
-            idx = {k: (hdr.index(norm_col(v)) if norm_col(v) in hdr else None) for k, v in COLS.items()}
-            if idx["略称"] is None:
-                cand = [i for i, h in enumerate(hdr) if "略称" in h]
-                idx["略称"] = cand[0] if cand else (1 if len(hdr) >= 2 else None)
-            out = []
-            for r in rows[hidx + 1:]:
-                get = lambda k: (r[idx[k]] if idx[k] is not None and idx[k] < len(r) else None)
-                drug = nz(get("薬品名"))
-                if not drug or norm_col(drug) in ("合計", "総合計", "小計", norm_col(COLS["薬品名"])):
+        for s, rows0, kind in open_tables(f):
+            for d, rows in _plan_parts(s, rows0, kind, fy, fm, d8, start, end):
+                if d in recs and recs[d][0] > sortkey:
                     continue
-                q, p = num(get("数量")), num(get("患者数"))
-                if not ((q is not None and q > 0) or (p is not None and p > 0)):
+                hidx = next((i for i, r in enumerate(rows) if norm_col(COLS["薬品名"]) in [norm_col(c) for c in r]), None)
+                if hidx is None:
                     continue
-                out.append(dict(日付=d, 薬品区分=nz(get("薬品区分")), 略称=(str(get("略称")).strip() if get("略称") is not None else None),
-                                薬品名=drug, 患者数=p, 数量=q, 在庫量=num(get("在庫量")), 在庫量_発注残込み=num(get("在庫量込み")),
-                                ファイル名=name, シート名=s))
-            recs[d] = (sortkey, out)
+                hdr = [norm_col(c) for c in rows[hidx]]
+                idx = {k: (hdr.index(norm_col(v)) if norm_col(v) in hdr else None) for k, v in COLS.items()}
+                if idx["略称"] is None:
+                    cand = [i for i, h in enumerate(hdr) if "略称" in h]
+                    idx["略称"] = cand[0] if cand else (1 if len(hdr) >= 2 else None)
+                out = []
+                for r in rows[hidx + 1:]:
+                    get = lambda k: (r[idx[k]] if idx[k] is not None and idx[k] < len(r) else None)
+                    drug = nz(get("薬品名"))
+                    if not drug or norm_col(drug) in ("合計", "総合計", "小計", norm_col(COLS["薬品名"])):
+                        continue
+                    q, p = num(get("数量")), num(get("患者数"))
+                    if not ((q is not None and q > 0) or (p is not None and p > 0)):
+                        continue
+                    out.append(dict(日付=d, 薬品区分=nz(get("薬品区分")), 略称=(str(get("略称")).strip() if get("略称") is not None else None),
+                                    薬品名=drug, 患者数=p, 数量=q, 在庫量=num(get("在庫量")), 在庫量_発注残込み=num(get("在庫量込み")),
+                                    ファイル名=name, シート名=s))
+                recs[d] = (sortkey, out)
     rows = [r for _, (_, rs) in sorted(recs.items()) for r in rs]
     return pd.DataFrame(rows, columns=["日付", "薬品区分", "略称", "薬品名", "患者数", "数量", "在庫量", "在庫量_発注残込み", "ファイル名", "シート名"])
 
@@ -237,14 +336,11 @@ def _dates_in(v):
 
 def load_suitou(folder, start=None, end=None, mark="数量一覧"):
     """出納：期間が start～end にかかるファイルだけ読む（⑤ と同じ。None なら全部）"""
-    files = [f for f in glob.glob(os.path.join(folder, "*.xls*"))
-             if mark in nz(os.path.basename(f)) and not os.path.basename(f).startswith("~$")]
+    files = [f for f in list_files(folder) if mark in nz(os.path.basename(f))]
     by_period = {}
     for f in files:
         name = os.path.basename(f)
-        wb = openpyxl.load_workbook(f, read_only=True, data_only=True)
-        ws = wb.worksheets[0]
-        rows = _sheet_rows(ws)
+        rows = first_table(f, "品名")
         hidx = next((i for i, r in enumerate(rows) if "品名" in [norm_col(c) for c in r]), None)
         if hidx is None:
             continue
@@ -297,16 +393,14 @@ def load_suitou(folder, start=None, end=None, mark="数量一覧"):
 #   見出し 1 行目、データ 2 行目から。フォルダの中で一番新しいファイル 1 本を読む
 # ------------------------------------------------------------------------------
 def load_system_list(folder, marker):
-    """フォルダの中で名前に marker を含む一番新しい .xls/.xlsx を読む。戻り値：DataFrame（列名は正規化）か None"""
+    """フォルダの中で名前に marker を含む一番新しいファイル（.xls／.xlsx／.csv／.txt）を読む。戻り値：DataFrame（列名は正規化）か None"""
     if not folder or not os.path.isdir(folder):
         return None
-    files = [f for f in glob.glob(os.path.join(folder, "*.xls*"))
-             if marker in nz(os.path.basename(f)) and not os.path.basename(f).startswith("~$")]
+    files = [f for f in list_files(folder) if marker in nz(os.path.basename(f))]
     if not files:
         return None
     f = max(files, key=lambda x: (os.path.getmtime(x), os.path.basename(x)))
-    ws = openpyxl.load_workbook(f, read_only=True, data_only=True).worksheets[0]
-    rows = _sheet_rows(ws)
+    rows = first_table(f, "品名")
     hidx = next((i for i, r in enumerate(rows) if "品名" in [norm_col(c) for c in r]), None)
     if hidx is None:
         return None

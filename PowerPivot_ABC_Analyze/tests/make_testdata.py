@@ -9,7 +9,11 @@
     手入力テーブル.xlsx                    … 設定ほか（bi/run.py --tables に渡せる。Excel に貼る値も同じ）
     期待値.xlsx                            … T_月次・M_薬品（主な指標）・T_判定理由の正解
     設定の値.txt                           … 分析用ブックの設定テーブルに入れる値
-  LibreOffice（soffice）があれば、.xls も作る（--xls）。実物は .xls なので、本番前は .xls でも試す
+  実物は .xls なので、Excel での確認は必ず .xls でも行う（.xlsx だけでは旧形式の癖が出ない）
+    .xls を作る       ：pwsh -File tools/make_xls.ps1（Excel を使う。tests/out/形式別/xls に出る）
+                        LibreOffice（soffice）があれば --xls でも作れる（実績・出納を .xls に置き換える）
+    .csv／.txt を作る ：python tests/make_formats.py（tests/out/形式別/csv・txt。--check で Python 版の結果を比べる）
+  ※ このスクリプトは tests/out を作り直す（形式別 も消える）ので、あとで上の 2 つを実行し直す
 
   ※ 実データは使わない・置かない。ここで作るのは決まった乱数（SEED）の架空データだけ
 """
@@ -141,6 +145,11 @@ def write_xlsx(path, sheets):
         ws = wb.create_sheet(title)
         for r in rows:
             ws.append(r)
+        # 実物に近づける：1000 以上の数値は桁区切りで表示（.xls では「1,234」という文字で読まれるので、その確認になる）
+        for row in ws.iter_rows():
+            for c in row:
+                if isinstance(c.value, (int, float)) and not isinstance(c.value, bool) and abs(c.value) >= 1000:
+                    c.number_format = "#,##0"
         if merged_second:   # 実物：1行目が見出し、2行目は空欄で1行目と縦に結合
             for c in range(1, len(rows[0]) + 1):
                 ws.merge_cells(start_row=1, start_column=c, end_row=2, end_column=c)

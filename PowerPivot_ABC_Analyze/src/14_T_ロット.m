@@ -2,7 +2,7 @@
 // ⑭ クエリ名：T_ロット（データモデルに読み込む）
 //    ロット（仕入伝票の行）ごとの使用期限と数量。期限の早いロットから順に、直近の払出ペースで
 //    「期限までに使い切れる量」と「返す量」を割り当てる
-//    ・元：エリシアSの「YYYYMMDD_期限切れリスト.xls」（設定「期限切迫フォルダパス」の一番新しいファイル。
+//    ・元：エリシアSの「YYYYMMDD_期限切れリスト」（設定「期限切迫フォルダパス」の一番新しいファイル。.xls／.xlsx／.csv／.txt。
 //          列：品名／ロット番号／期限／期限切れ数量／単位）と、㉑ 不動品リスト のロット（期限日・数量）
 //      同じ薬品名×ロットが両方にあれば期限切れリストを使う
 //    ・品名の先頭の記号（「劇 」「向 」など）と先頭の空白を外して 薬品名 にする（⑤ 出納と同じ）
@@ -14,20 +14,46 @@
 let
     Prm   = #"設定値",
     Nz    = #"fx_正規化",
+    Open  = #"fx_ファイルを開く",
     Norm  = (t as any) as text =>
         let s = if t = null then "" else Nz(Text.From(t))
         in  Text.Replace(Text.Replace(Text.Remove(s, {" ", "　", "#(lf)", "#(cr)", "#(tab)"}), "(", "（"), ")", "）"),
     CleanPath = (v as any) as nullable text =>
         if v = null or (v is text and Text.Trim(v) = "") then null
         else Text.TrimEnd(Text.Trim(Text.Remove(Text.From(v), {""""})), {"\", "/", " ", "　"}),
+    // 数値：.xls と文字のファイルでは、数値が「表示されている文字」で来る（1,234／100錠／¥9,801／▲50 など）
+    //   空白・桁区切り・円記号を除き、▲△ はマイナスにする。そのまま数値にできなければ、先頭の数字の部分だけを使う
     Num = (val as any) as nullable number =>
         if val = null then null
         else if val is number then val
-        else let txt = Text.Remove(Nz(Text.From(val)), {" ", ","})
-             in  if txt = "" then null else try Number.FromText(txt, "en-US") otherwise null,
+        else
+            let
+                t0    = Text.Remove(Nz(Text.From(val)), {" ", "#(lf)", "#(cr)", "#(tab)", ",", "¥", "￥", "\"}),
+                t1    = Text.Replace(Text.Replace(t0, "▲", "-"), "△", "-"),
+                whole = if t1 = "" then null else try Number.FromText(t1, "en-US") otherwise null,
+                head  = Text.Combine(List.FirstN(Text.ToList(t1), each List.Contains({"0" .. "9", ".", "-"}, _))),
+                part  = if Text.Select(head, {"0" .. "9"}) = "" then null else try Number.FromText(head, "en-US") otherwise null
+            in  if whole <> null then whole else part,
     Txt = (val as any) as nullable text =>
         if val = null then null else let s = Text.Trim(Text.From(val)) in if s = "" then null else s,
-    Dat = (val as any) as nullable date => try Date.From(val) otherwise null,
+    // 日付：日付のセル・yyyy/mm/dd・yyyy-mm-dd・yyyy年m月d日・8桁の数字（文字のファイルでは文字で入っている）
+    Dat = (val as any) as nullable date =>
+        if val = null then null
+        else if val is date then val
+        else if val is datetime then Date.From(val)
+        else
+            let
+                s0 = Nz(Text.From(val)),
+                s  = Text.BeforeDelimiter(Text.Trim(Text.Replace(Text.Replace(Text.Replace(Text.Replace(Text.Replace(s0,
+                         "年", "/"), "月", "/"), "日", ""), "-", "/"), ".", "/")), " "),
+                p  = Text.Split(s, "/"),
+                d  = if List.Count(p) = 3 and Text.Length(p{0}) = 4
+                     then (try #date(Number.FromText(p{0}), Number.FromText(p{1}), Number.FromText(p{2})) otherwise null)
+                     else if Text.Length(s) = 8 and Text.Select(s, {"0" .. "9"}) = s
+                     then (try #date(Number.FromText(Text.Start(s, 4)), Number.FromText(Text.Middle(s, 4, 2)),
+                                     Number.FromText(Text.End(s, 2))) otherwise null)
+                     else null
+            in  if d <> null then d else try Date.From(val) otherwise null,
     Marks = {"劇", "向", "毒", "麻", "覚", "習", "生"},
     SplitMark = (v as any) as record =>
         let s = if v = null then null else Nz(Text.From(v))
@@ -40,24 +66,21 @@ let
         else
             let
                 fs  = Table.SelectRows(Folder.Files(folder), each
-                          Text.StartsWith(Text.Lower([Extension]), ".xls") and not Text.StartsWith([Name], "~$")
+                          (Text.StartsWith(Text.Lower([Extension]), ".xls") or List.Contains({".csv", ".txt", ".tsv"}, Text.Lower([Extension]))) and not Text.StartsWith([Name], "~$")
                           and Text.Contains(Nz([Name]), marker)),
                 srt = Table.Sort(fs, {{"Date modified", Order.Descending}, {"Name", Order.Descending}})
             in
                 if Table.IsEmpty(srt) then null else srt{0},
     ReadTable = (f as record) as table =>
         let
-            wb     = Excel.Workbook(f[Content], null, true),
-            sheets = if Table.HasColumns(wb, "Kind") then Table.SelectRows(wb, each [Kind] = "Sheet")
-                     else Table.SelectRows(wb, each
-                              let n = Text.TrimEnd(Text.Remove(Text.From([Name]), {"'"}), "$")
-                              in  not Text.Contains(n, "$") and not Text.Contains(n, "Print_") and not Text.Contains(n, "_xlnm")),
-            raw    = sheets{0}[Data],
+            raw    = Open(f[Content], f[Name], "品名"){0}[Data],
             rows   = Table.ToRows(Table.FirstN(raw, 30)),
             hIdx   = List.PositionOf(List.Transform(rows, (r) => List.Contains(List.Transform(r, Norm), "品名")), true)
         in
-            Table.TransformColumnNames(
-                Table.PromoteHeaders(Table.Skip(raw, List.Max({hIdx, 0})), [PromoteAllScalars = true]), Norm),
+            if hIdx < 0 then error Error.Record("読めないファイル",
+                   "「" & f[Name] & "」に、見出し「品名」のある行がありません（先頭 30 行）")
+            else Table.TransformColumnNames(
+                     Table.PromoteHeaders(Table.Skip(raw, hIdx), [PromoteAllScalars = true]), Norm),
 
     Drugs    = Table.Buffer(Table.SelectColumns(#"M_薬品", {"薬品名", "直近の1日平均払出"})),
     BaseDate = Prm[発注日],

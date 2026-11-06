@@ -19,6 +19,7 @@ $ErrorActionPreference = "Stop"
 $ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 if (-not $Out) { $Out = Join-Path $ROOT "tests\out_excel" }
 New-Item -ItemType Directory -Force $Out | Out-Null
+$Queries = @($Queries | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })   # -File 経由では「a,b,c」が 1 つの文字列で来る
 function ConnStr($q) { "OLEDB;Provider=Microsoft.Mashup.OleDb.1;Data Source=`$Workbook`$;Location=$q;Extended Properties=`"`"" }
 function CsvCell($v) {
     if ($null -eq $v) { return "" }
