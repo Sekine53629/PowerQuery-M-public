@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from model import Model, Settings, month_start, month_end, months_between, fmt0, DEFAULTS
 from run import abc_monthly, abc_window, r3_expiry, r4_shortage, k6_share
 
-DEFAULTS.update(発注点の日数=7, 発注量の日数=21, 極小需要の箱数=1, 転送候補の在庫日数=120, 予測できるずれの線=0.5)
+DEFAULTS.update(発注点の日数=7, 発注量の日数=21, 転送候補の在庫日数=120, 予測できるずれの線=0.5, 発注点見直しの変化=0.2)
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 
 
@@ -81,11 +81,6 @@ def num_or(v, d=0.0):
     return d if v is None or (isinstance(v, float) and math.isnan(v)) else float(v)
 
 
-def pack_of(r, settings):
-    p = r.get("包装単位")
-    return float(p) if p is not None and not (isinstance(p, float) and math.isnan(p)) and p > 0 else settings.num("標準の包装単位")
-
-
 def monthly_series(model, key_of):
     """月 × キー の払出（出納のある月）。戻り値：months, {key: [払出...]}"""
     t = model.T_月次[model.T_月次["出納データあり"]]
@@ -101,12 +96,12 @@ def monthly_series(model, key_of):
 
 
 def holding_policy(r, settings):
-    """方針書の 4 区分：回転（直近の1箱消化日数）× 予測できるか（ずれの大きさ）"""
-    box = r.get("直近の1箱消化日数")
-    turns = (box is not None and not pd.isna(box) and box < settings.num("1箱消化の注意日数"))
+    """方針書の 4 区分：回転（直近の1日平均払出 × 30 ≧ 極小需要の月の払出）× 予測できるか（ずれの大きさ）"""
+    per_day = num_or(r.get("直近の1日平均払出"))
+    turns = per_day * 30 >= settings.num("極小需要の月の払出")
     gs = r.get("ずれの大きさ")
     predictable = (gs is not None and not pd.isna(gs) and gs < settings.num("予測できるずれの線"))
-    if box is None or pd.isna(box):
+    if per_day <= 0:
         return "持たない（払出なし）"
     if turns and predictable:
         return "自動発注で持つ"
@@ -131,6 +126,7 @@ def page_a(model, settings, abc_m):
     prev_m = months[-2] if len(months) >= 2 else None
     prev = abc_window(model.T_月次, d, prev_m, n, settings.num("ABCのAの線"), settings.num("ABCのBの線")) if prev_m else {}
     rop_days, oq_days = settings.num("発注点の日数"), settings.num("発注量の日数")
+    chg_line = settings.num("発注点見直しの変化")
     rows = []
     for k, (out, share, cum, cls) in cur.items():
         s = series.get(k, [])
@@ -142,16 +138,15 @@ def page_a(model, settings, abc_m):
             continue
         main = drugs.sort_values("直近の払出合計", ascending=False).iloc[0]
         per_day = num_or(main["直近の1日平均払出"])
-        pack = pack_of(main, settings)
         rop = math.ceil(per_day * rop_days)
-        oq = max(1, math.ceil(per_day * oq_days / pack)) * pack if per_day > 0 else 0
+        oq = math.ceil(per_day * oq_days)
         policy = holding_policy(main, settings)
         reasons = []
         if pcls and pcls != cls:
             reasons.append(f"区分 {pcls}→{cls}")
-        if change is not None and abs(change) >= 0.2:
+        if change is not None and abs(change) >= chg_line:
             reasons.append(f"直近{n}ヶ月の払出が前の{n}ヶ月より {change*100:+.0f}%")
-        if (change is None or abs(change) < 0.2) and (not pcls or pcls == cls):
+        if (change is None or abs(change) < chg_line) and (not pcls or pcls == cls):
             continue
         rows.append(dict(key=k, 屋号=len(drugs), 代表=main["薬品名"], 区分=f"{pcls or '－'}→{cls}", 変更=(pcls != cls),
                          直近=recent, 前=before, 変化=change, 構成比=share, 持ち方=policy, 発注点=rop, 発注量=oq,
@@ -160,9 +155,9 @@ def page_a(model, settings, abc_m):
     counts = {c: sum(1 for v in cur.values() if v[3] == c) for c in "ABC"}
     changed = sum(1 for r in rows if r["変更"])
     body = [f"<div class='kpi'><div>対象月<b>{cur_m:%Y/%m}</b></div><div>区分 A／B／C<b>{counts['A']}／{counts['B']}／{counts['C']}</b></div>"
-            f"<div>区分が変わったまとまり<b>{changed}</b></div><div>払出が ±20% 以上動いた<b>{sum(1 for r in rows if r['変化'] is not None and abs(r['変化'])>=0.2)}</b></div></div>",
+            f"<div>区分が変わったまとまり<b>{changed}</b></div><div>払出が ±{chg_line*100:.0f}% 以上動いた<b>{sum(1 for r in rows if r['変化'] is not None and abs(r['変化'])>=chg_line)}</b></div></div>",
             "<p class='how'>見方：区分が変わった、または直近の払出が大きく動いたまとまりだけを載せています。発注点の目安 ＝ 直近の1日平均払出 × "
-            f"{rop_days:.0f} 日、発注量の目安 ＝ {oq_days:.0f} 日分を包装単位に切り上げ。持ち方は 回転（直近の1箱消化日数）× 予測できるか（ずれの大きさ）で決めています。</p>",
+            f"{rop_days:.0f} 日、発注量の目安 ＝ 直近の1日平均払出 × {oq_days:.0f} 日。持ち方は 回転（月の払出が極小需要の線以上）× 予測できるか（ずれの大きさ）で決めています。</p>",
             "<table><thead><tr><th>需要のまとまり</th><th>屋号</th><th>代表の薬（払出の多い屋号）</th><th>区分</th><th>直近%dヶ月</th><th>前の%dヶ月</th><th>変化</th><th>構成比</th>"
             "<th>12ヶ月の払出（右3本＝直近）</th><th>持ち方</th><th>発注点の目安</th><th>発注量の目安</th><th>理由</th></tr></thead><tbody>" % (n, n)]
     for r in rows[:40]:
@@ -203,14 +198,10 @@ def page_b(model, settings):
         if not (dead or over):
             continue
         per_day = num_or(r["直近の1日平均払出"])
-        pack = pack_of(r, settings)
         surplus = max(0.0, stock - per_day * horizon)
-        boxes = math.floor(surplus / pack)
         others = [x for x in alive.get(r["需要のまとまり"], []) if x != r["薬品名"]]
-        if dead and boxes >= 1:
-            act = "返品（箱のまま）"
-        elif dead:
-            act = "廃棄か他店へ転送（端数）"
+        if dead:
+            act = "返品（できなければ廃棄か他店へ転送）"
         elif others and (rdays is None or rdays >= transfer_d):
             act = f"他店へ転送（同じ成分は {others[0]} が動いている）"
         elif rdays is not None and rdays >= transfer_d:
@@ -218,20 +209,20 @@ def page_b(model, settings):
         else:
             act = "様子見（発注を止める）"
         rows.append(dict(薬品名=r["薬品名"], 棚番=r["棚番"], まとまり=r["需要のまとまり"], 在庫=stock, 最後=r["最後に動いた月"], 不動=still, システム不動=sys_idle,
-                         在庫日数=rdays, 余った=surplus, 箱=boxes, 処置=act, dead=dead))
+                         在庫日数=rdays, 余った=surplus, 処置=act, dead=dead))
     rows.sort(key=lambda x: (not x["dead"], -(x["不動"] or 0), -(x["在庫日数"] or 1e9)))
-    tot_stock = sum(r["在庫"] for r in rows); tot_box = sum(r["箱"] for r in rows)
+    tot_stock = sum(r["在庫"] for r in rows)
     vmax = max([r["在庫"] for r in rows] + [1])
     body = [f"<div class='kpi'><div>不動（{still_m:.0f}ヶ月以上動きなし）<b>{sum(1 for r in rows if r['dead'])} 品目</b></div><div>在庫過多（直近の在庫 {over_d:.0f} 日分以上）<b>{sum(1 for r in rows if not r['dead'])} 品目</b></div>"
-            f"<div>対象の在庫数量<b>{fmt0(tot_stock)}</b></div><div>返品できる箱数<b>{tot_box}</b></div></div>",
-            f"<p class='how'>見方：余った量 ＝ 在庫 − 直近の1日平均払出 × 当面の予定 {horizon:.0f} 日。返品できる箱数はその包装単位での切り捨て。"
+            f"<div>対象の在庫数量<b>{fmt0(tot_stock)}</b></div></div>",
+            f"<p class='how'>見方：余った量 ＝ 在庫 − 直近の1日平均払出 × 当面の予定 {horizon:.0f} 日。"
             f"同じ成分の別の屋号が動いていれば「転送」、動きがなければ「返品」を勧めます。処置は目安で、最終判断は現場です。</p>",
-            "<table><thead><tr><th>薬品名</th><th>棚番</th><th>需要のまとまり</th><th>在庫</th><th>最後に動いた月</th><th>動きなし</th><th>不動品リスト</th><th>直近の在庫日数</th><th>余った量</th><th>返品できる箱</th><th>処置の案</th></tr></thead><tbody>"]
+            "<table><thead><tr><th>薬品名</th><th>棚番</th><th>需要のまとまり</th><th>在庫</th><th>最後に動いた月</th><th>動きなし</th><th>不動品リスト</th><th>直近の在庫日数</th><th>余った量</th><th>処置の案</th></tr></thead><tbody>"]
     for r in rows[:45]:
         body.append(f"<tr class='{'dead' if r['dead'] else ''}'><td>{esc(r['薬品名'])}</td><td>{esc(r['棚番'])}</td><td>{esc(r['まとまり'])}</td>"
                     f"<td>{hbar(r['在庫'], vmax)}</td><td>{r['最後'].strftime('%Y/%m') if r['最後'] is not None and not pd.isna(r['最後']) else ''}</td>"
                     f"<td class='num'>{'' if r['不動'] is None else str(r['不動'])+'ヶ月'}</td><td class='num'>{'' if r['システム不動'] is None else fmt0(r['システム不動'])+'日'}</td><td class='num'>{'' if r['在庫日数'] is None else fmt0(r['在庫日数'])+'日'}</td>"
-                    f"<td class='num'>{fmt0(r['余った'])}</td><td class='num'>{r['箱']}</td><td>{esc(r['処置'])}</td></tr>")
+                    f"<td class='num'>{fmt0(r['余った'])}</td><td>{esc(r['処置'])}</td></tr>")
     body.append("</tbody></table>")
     if not rows:
         body.append("<p class='empty'>該当なし</p>")
@@ -397,14 +388,13 @@ def page_d(model, settings):
 # ------------------------------------------------------------------------------
 def page_e(model, settings):
     d = model.M_薬品
-    box_n = settings.num("極小需要の箱数")
+    tiny_out = settings.num("極小需要の月の払出")
     rows = []
     for _, r in d.iterrows():
-        pack = pack_of(r, settings)
         recent = num_or(r["直近の払出合計"])
         if r["出どころ"] == "出納だけ" and recent == 0 and num_or(r["最終在庫"]) == 0:
             continue
-        if recent > pack * box_n * int(settings.num("直近の月数")):      # 月 1 箱以下（直近 N ヶ月で N 箱以下）
+        if recent > tiny_out * int(settings.num("直近の月数")):      # 直近 N ヶ月の払出が 極小需要の月の払出 × N 以下
             continue
         typ = r["需要の型"] if isinstance(r["需要の型"], str) else "予定なし"
         stock = num_or(r["最終在庫"]); rd = r["直近の在庫日数"]
@@ -418,16 +408,16 @@ def page_e(model, settings):
         elif stock <= 0:
             act = "在庫なし。患者ごとに取り寄せ（発注除外に登録）"
         elif rd is not None and not pd.isna(rd) and rd >= settings.num("在庫過多とみなす日数"):
-            act = "1箱だけ持つ。余りは転送"
+            act = "最小限だけ持つ。余りは転送"
         else:
-            act = "最低在庫 1箱で運用"
+            act = "最小限の在庫で運用"
         rows.append(dict(薬品名=r["薬品名"], 型=typ, 間隔=r["平均間隔"], 患者=num_or(r["予定患者数合計"]), 直近=recent, 在庫=stock, 在庫日数=rd,
                          最後=r["最後に動いた月"], 動いた月=r["動いた月数"], 除外=excl, 処置=act))
     rows.sort(key=lambda x: (x["除外"], -(x["在庫日数"] if x["在庫日数"] is not None and not pd.isna(x["在庫日数"]) else 1e9), -x["在庫"]))
-    body = [f"<div class='kpi'><div>極小需要（直近 {int(settings.num('直近の月数'))} ヶ月の払出が月 {box_n:.0f} 箱以下）<b>{len(rows)} 品目</b></div>"
+    body = [f"<div class='kpi'><div>極小需要（直近 {int(settings.num('直近の月数'))} ヶ月の払出が月 {fmt0(tiny_out)} 以下）<b>{len(rows)} 品目</b></div>"
             f"<div>うち在庫あり<b>{sum(1 for r in rows if r['在庫']>0)}</b></div><div>その在庫数量<b>{fmt0(sum(r['在庫'] for r in rows))}</b></div>"
             f"<div>発注除外に登録済み<b>{sum(1 for r in rows if r['除外'])}</b></div></div>",
-            "<p class='how'>見方：ほとんど出ない薬は、1 箱持つか、持たずに患者ごとに取り寄せるかを決めます。在庫が直近の払出に対して多すぎるものは転送・返品の候補です。"
+            "<p class='how'>見方：ほとんど出ない薬は、最小限だけ持つか、持たずに患者ごとに取り寄せるかを決めます。在庫が直近の払出に対して多すぎるものは転送・返品の候補です。"
             "平均間隔は「処方のあった日数 ÷ その薬の予定があった日数」で、大きいほどまれです。</p>",
             "<table><thead><tr><th>薬品名</th><th>需要の型</th><th>平均間隔（日）</th><th>年間の予定患者数</th><th>直近の払出</th><th>在庫</th><th>直近の在庫日数</th><th>最後に動いた月</th><th>動いた月数</th><th>発注除外</th><th>処置の案</th></tr></thead><tbody>"]
     for r in rows[:60]:

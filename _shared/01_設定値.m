@@ -2,6 +2,7 @@
 // ① クエリ名：設定値
 //    設定テーブル（計算に使う値とフォルダ）を読み込む
 //    エリシアSの出力の列名・ファイル名は決まっているので、ここに固定で書く（設定テーブルでは変えない）
+//    実績を読む期間（開始日～終了日）は、設定になければ「発注日までの 1 年間」にする（0.3.0）
 // ================================================================================
 let
     Source = Excel.CurrentWorkbook(){[Name = "設定"]}[Content],
@@ -41,6 +42,13 @@ let
     FcStart    = if FcStartRaw = null then Date.AddDays(OrderDate, 1) else Date.From(FcStartRaw),
     FcEnd      = Date.AddDays(FcStart, Number.From(Get("予測日数", 7)) - 1),
     FcLoadEnd  = List.Max({FcEnd, Date.AddDays(FcStart, Number.From(Get("予測の読込日数", 14)) - 1)}),
+    // 実績を読む期間（設定に開始日・終了日があればその値。なければ次で決める）
+    //   終了日 ＝ 予測開始日の前日（予測開始日が空欄なら発注日）
+    //   開始日 ＝ 終了日の 1 年前の翌日が属する月の 1 日（出納が月単位なので、月の途中から読まない）
+    EndRaw     = Get("終了日", null),
+    HistEnd    = if EndRaw = null then Date.AddDays(FcStart, -1) else Date.From(EndRaw),
+    StartRaw   = Get("開始日", null),
+    HistStart  = if StartRaw = null then Date.StartOfMonth(Date.AddDays(Date.AddYears(HistEnd, -1), 1)) else Date.From(StartRaw),
 
     // フォルダパスの前後の「"」・空白・末尾の「\」を取り除く
     // （エクスプローラーの「パスのコピー」で付く「"」などに対応）
@@ -51,6 +59,7 @@ let
     Result = Rec & [列名 = Cols, 列名_実績 = ColsHist, 列名_予測 = ColsFc,
                     先頭 = Prefix, 出納の目印 = SuiMark,
                     発注日 = OrderDate, 予測開始 = FcStart, 予測終了 = FcEnd, 予測読込終了 = FcLoadEnd,
+                    開始日 = HistStart, 終了日 = HistEnd,
                     フォルダパス     = CleanPath(Get("フォルダパス", null)),
                     予測フォルダパス = CleanPath(Get("予測フォルダパス", null)),
                     出納フォルダパス = CleanPath(Get("出納フォルダパス", null))]

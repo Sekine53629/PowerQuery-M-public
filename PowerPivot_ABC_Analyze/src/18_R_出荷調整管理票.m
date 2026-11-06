@@ -121,7 +121,7 @@ let
                                直近の払出 = r[直近の払出合計] ?? 0,
                                構成比 = if tot = 0 then 0 else (r[直近の払出合計] ?? 0) / tot,
                                在庫 = r[最終在庫], 直近の在庫日数 = r[直近の在庫日数], 先月の仕入 = r[先月の仕入],
-                               状態 = st, 疑い = tag, 疑いの順 = tagOrd, 切替・転送の案 = advice, まとまりの払出 = tot]
+                               状態 = st, 疑い = tag, 疑いの順 = tagOrd, #"切替・転送の案" = advice, まとまりの払出 = tot]
                               & Record.FromList(s, MonthCols)))
         in
             out,

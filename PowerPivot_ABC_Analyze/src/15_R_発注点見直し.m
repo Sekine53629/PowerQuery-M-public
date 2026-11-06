@@ -4,11 +4,12 @@
 //    設定「発注点見直しの変化」（初期値 0.2＝±20%）以上動いた「需要のまとまり」だけを載せる
 //    ・代表の薬：まとまりの中で直近の払出が一番多い薬（供給状況が「通常」以外の屋号は後回し）
 //    ・発注点の目安 ＝ 直近の1日平均払出 × 設定「発注点の日数」（切り上げ）
-//    ・発注量の目安 ＝ 直近の1日平均払出 × 設定「発注量の日数」を包装単位に切り上げ（最低1箱）
-//    ・持ち方：回転（直近の1箱消化日数 < 1箱消化の注意日数）× 予測できる（ずれの大きさ < 予測できるずれの線）
+//    ・発注量の目安 ＝ 直近の1日平均払出 × 設定「発注量の日数」（切り上げ）
+//    ・持ち方：回転（直近の1日平均払出 × 30 ≧ 設定「極小需要の月の払出」）× 予測できる（ずれの大きさ < 予測できるずれの線）
 //        回る×予測できる → 自動発注で持つ／回る×できない → 最低在庫を持つ／
 //        回らない×できる → 持たずに取り寄せ／回らない×できない → 持たない
 //    ・月01～月12：直近12ヶ月（出納のある月）の払出。月12 が一番新しい月（スパークライン用）
+//    ・区分変更：変わったら「○」（印刷して読む表なので、真偽ではなく印にする）
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -18,8 +19,7 @@ let
     N        = Number.RoundDown(Num("ABCの月数", 3)),
     RopDays  = Num("発注点の日数", 7),
     OqDays   = Num("発注量の日数", 21),
-    StdPack  = Num("標準の包装単位", 100),
-    BoxDays  = Num("1箱消化の注意日数", 180),
+    TinyOut  = Num("極小需要の月の払出", 100),
     GsLine   = Num("予測できるずれの線", 0.5),
     ChgLine  = Num("発注点見直しの変化", 0.2),
     MonthCols = List.Transform({1 .. 12}, (i) => "月" & Text.PadStart(Text.From(i), 2, "0")),
@@ -51,12 +51,12 @@ let
                  {"屋号数", each Table.RowCount(_), Int64.Type},
                  {"r", each Table.First(Table.Sort(_, {{"k", Order.Ascending}, {"直近の払出合計", Order.Descending}})), type record}}),
     RepE   = Table.ExpandRecordColumn(Rep, "r",
-                 {"薬品名", "直近の1日平均払出", "包装単位", "直近の1箱消化日数", "ずれの大きさ"},
-                 {"代表の薬", "直近の1日平均払出", "包装単位", "直近の1箱消化日数", "ずれの大きさ"}),
+                 {"薬品名", "直近の1日平均払出", "ずれの大きさ"},
+                 {"代表の薬", "直近の1日平均払出", "ずれの大きさ"}),
 
     J1 = Table.ExpandTableColumn(Table.NestedJoin(AbcCur, {"需要のまとまり"}, PerGrp, {"まとまり"}, "sj", JoinKind.LeftOuter), "sj", {"s"}),
     J2 = Table.ExpandTableColumn(Table.NestedJoin(J1, {"需要のまとまり"}, RepE, {"まとまり"}, "r", JoinKind.LeftOuter), "r",
-             {"屋号数", "代表の薬", "直近の1日平均払出", "包装単位", "直近の1箱消化日数", "ずれの大きさ"}),
+             {"屋号数", "代表の薬", "直近の1日平均払出", "ずれの大きさ"}),
 
     Calc = Table.AddColumn(J2, "計算", each
         let
@@ -67,13 +67,11 @@ let
             before = if n12 >= 2 * N then List.Sum(List.FirstN(List.LastN(s, 2 * N), N)) else null,
             chg    = if before = null or before = 0 then null else (recent - before) / before,
             perDay = [直近の1日平均払出] ?? 0,
-            pack   = if [包装単位] = null or [包装単位] <= 0 then StdPack else [包装単位],
             rop    = Number.RoundUp(perDay * RopDays),
-            oq     = if perDay > 0 then List.Max({1, Number.RoundUp(perDay * OqDays / pack)}) * pack else 0,
-            box    = [直近の1箱消化日数],
-            turns  = box <> null and box < BoxDays,
+            oq     = Number.RoundUp(perDay * OqDays),
+            turns  = perDay * 30 >= TinyOut,
             pred   = [ずれの大きさ] <> null and [ずれの大きさ] < GsLine,
-            policy = if box = null then "持たない（払出なし）"
+            policy = if perDay <= 0 then "持たない（払出なし）"
                      else if turns and pred then "自動発注で持つ"
                      else if turns then "最低在庫を持つ"
                      else if pred then "持たずに取り寄せ"
@@ -87,7 +85,7 @@ let
             months  = Record.FromList(s, MonthCols)
         in
             [直近の払出 = recent, 前の払出 = before, 変化 = chg, 変化の大きさ = if chg = null then 0 else Number.Abs(chg),
-             持ち方 = policy, 発注点の目安 = rop, 発注量の目安 = oq, 理由 = reason, 区分変更 = changed, 対象 = changed or moved] & months),
+             持ち方 = policy, 発注点の目安 = rop, 発注量の目安 = oq, 理由 = reason, 区分変更 = if changed then "○" else "", 対象 = changed or moved] & months),
     E    = Table.ExpandRecordColumn(Calc, "計算",
                {"直近の払出", "前の払出", "変化", "変化の大きさ", "持ち方", "発注点の目安", "発注量の目安", "理由", "区分変更", "対象"} & MonthCols),
     Sel  = Table.SelectRows(E, each [対象]),
@@ -97,7 +95,7 @@ let
     Ren  = Table.RenameColumns(Out, {{"区分", "今月の区分"}}),
     Typed = Table.TransformColumnTypes(Ren, {
                {"需要のまとまり", type text}, {"屋号数", Int64.Type}, {"代表の薬", type text}, {"前月の区分", type text},
-               {"今月の区分", type text}, {"区分変更", type logical}, {"直近の払出", type number}, {"前の払出", type number},
+               {"今月の区分", type text}, {"区分変更", type text}, {"直近の払出", type number}, {"前の払出", type number},
                {"変化", Percentage.Type}, {"構成比", Percentage.Type}, {"持ち方", type text},
                {"発注点の目安", type number}, {"発注量の目安", type number}, {"理由", type text}, {"期間", type text},
                {"変化の大きさ", type number}} & List.Transform(MonthCols, (c) => {c, type number})),

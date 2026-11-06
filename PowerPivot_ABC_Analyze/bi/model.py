@@ -78,6 +78,13 @@ def month_end(d):
     return n - dt.timedelta(days=1)
 
 
+def add_years(d, n):
+    try:
+        return d.replace(year=d.year + n)
+    except ValueError:                     # 2/29
+        return d.replace(year=d.year + n, day=28)
+
+
 def months_between(a, b):
     return (b.year - a.year) * 12 + b.month - a.month
 
@@ -85,11 +92,13 @@ def months_between(a, b):
 # ------------------------------------------------------------------------------
 # 設定（手入力テーブル.xlsx）
 # ------------------------------------------------------------------------------
-DEFAULTS = dict(標準の包装単位=100, 不動とみなす月数=3, 在庫過多とみなす日数=60, **{"1箱消化の注意日数": 180},
+DEFAULTS = dict(不動とみなす月数=3, 在庫過多とみなす日数=60,
                 ずれの注意割合=0.3, ずれの大きさの注意割合=0.5,
                 # 月次レポート用（0.2.0 で設定テーブルに追加する項目。空欄なら初期値）
                 当面の予定日数=30, ABCの月数=3, ABCのAの線=0.7, ABCのBの線=0.9,
-                出荷調整の構成比の変化=0.3, 出荷調整の合計の許容=0.3, 期限切迫の日数=180, 直近の月数=3)
+                出荷調整の構成比の変化=0.3, 出荷調整の合計の許容=0.3, 期限切迫の日数=180, 直近の月数=3,
+                # 0.3.0：包装単位を使わない。極小需要の線は「月の払出」1 本（G02・A の回転・E）
+                極小需要の月の払出=100)
 
 
 class Settings:
@@ -112,9 +121,12 @@ class Settings:
         self.kigen_folder = self.text("期限切迫フォルダパス")
         self.keika_folder = self.text("経過措置フォルダパス")
         self.fudo_folder = self.text("不動品フォルダパス")
-        self.start = to_date(self.raw.get("開始日"))
-        self.end = to_date(self.raw.get("終了日"))
         self.base_date = to_date(self.raw.get("発注日")) or dt.date.today()
+        # 実績を読む期間（① 設定値と同じ）：設定に開始日・終了日があればその値。なければ
+        #   終了日 ＝ 予測開始日（発注日の翌日）の前日 ＝ 発注日、開始日 ＝ 終了日の 1 年前の翌日が属する月の 1 日
+        fc_start = to_date(self.raw.get("予測開始日")) or (self.base_date + dt.timedelta(days=1))
+        self.end = to_date(self.raw.get("終了日")) or (fc_start - dt.timedelta(days=1))
+        self.start = to_date(self.raw.get("開始日")) or month_start(add_years(self.end, -1) + dt.timedelta(days=1))
         ye_s, ye_e = self.raw.get("年末年始の休み始め") or "12/29", self.raw.get("年末年始の休み終わり") or "1/3"
         self.ye_start = tuple(int(x) for x in str(ye_s).replace("-", "/").split("/")[-2:])
         self.ye_end = tuple(int(x) for x in str(ye_e).replace("-", "/").split("/")[-2:])
@@ -223,7 +235,8 @@ def _dates_in(v):
     return [d for d in (to_date(t) for t in toks if t) if d and 1990 <= d.year <= 2100]
 
 
-def load_suitou(folder, mark="数量一覧"):
+def load_suitou(folder, start=None, end=None, mark="数量一覧"):
+    """出納：期間が start～end にかかるファイルだけ読む（⑤ と同じ。None なら全部）"""
     files = [f for f in glob.glob(os.path.join(folder, "*.xls*"))
              if mark in nz(os.path.basename(f)) and not os.path.basename(f).startswith("~$")]
     by_period = {}
@@ -245,6 +258,8 @@ def load_suitou(folder, mark="数量一覧"):
             if len(toks) >= 2 and to_date(toks[0]) and to_date(toks[1]) and to_date(toks[0]) <= to_date(toks[1]):
                 period = (to_date(toks[0]), to_date(toks[1]))
         if period is None:
+            continue
+        if (start and period[1] < start) or (end and period[0] > end):
             continue
         key = period
         sortkey = os.path.getmtime(f)
@@ -414,7 +429,7 @@ def calendar(lo, hi, settings):
 REASON_CODES = [
     ("S01", "在庫・不動", "警告", 1, "{値}ヶ月、不動です。（在庫 {在庫}）"),
     ("S02", "在庫・不動", "注意", 2, "在庫が {値}日分あります。（目安 {線}日）"),
-    ("S03", "在庫・不動", "注意", 2, "1箱を使い切るのに {値}日かかります。期限に注意です。"),
+    ("S03", "在庫・不動", "欠番", 9, "（欠番）0.3.0 で廃止。包装単位を使わなくなったため"),
     ("S04", "在庫・不動", "情報", 3, "返品・廃棄・移動などで {値} 減っています。"),
     ("D01", "需要", "情報", 3, "需要は安定しています。（平均 {値}日に1回）"),
     ("D02", "需要", "情報", 3, "需要は量がばらつきます。（平均 {値}日に1回）"),
@@ -450,7 +465,7 @@ class Model:
         self.s = settings
         S = settings
         self.日次データ = load_plan(S.folder, S.start, S.end)
-        self.出納 = load_suitou(S.sui_folder)
+        self.出納 = load_suitou(S.sui_folder, S.start, S.end)
         self.経過措置該当 = keika_list(S.keika_folder)
         self.期限切れリスト = kigen_list(S.kigen_folder)
         self.不動品リスト = fudo_list(S.fudo_folder)
@@ -526,9 +541,10 @@ class Model:
     # ⑨
     def _m_drug(self):
         S = self.s
-        std_pack = S.num("標準の包装単位")
         day, mon, sui = self.T_日次, self.T_月次, self.出納
-        names = sorted(set(day["薬品名"].dropna()) | set(mon["薬品名"].dropna()))
+        # 対象の薬：予定か出納に出た薬 ＋ 不動品リスト・経過措置薬品リストにだけ載る薬（⑨ と同じ。出納の期間より前から動いていない薬を拾う）
+        names = sorted(set(day["薬品名"].dropna()) | set(mon["薬品名"].dropna())
+                       | set(self.不動品リスト["薬品名"].dropna()) | set(self.経過措置該当["薬品名"].dropna()))
         base = pd.DataFrame({"薬品名": names})
         # 略称・製剤（予定）
         src = self.日次データ[["日付", "薬品名", "略称", "薬品区分"]]
@@ -555,7 +571,7 @@ class Model:
                 fudo[n] = dict(最終払出日=last, 不動日数=(None if idle is None else float(idle)), 数量=float(g["数量"].fillna(0).sum()),
                                薬価=(float(g["薬価"].dropna().max()) if g["薬価"].notna().any() else None),
                                YJコード=(g["YJコード"].dropna().iloc[0] if g["YJコード"].notna().any() else None))
-        stock = hand["在庫情報"].copy() if len(hand["在庫情報"]) else pd.DataFrame(columns=["薬品名", "包装単位", "列数"])
+        stock = hand["在庫情報"].copy() if len(hand["在庫情報"]) else pd.DataFrame(columns=["薬品名", "列数"])
         stock["薬品名"] = stock["薬品名"].map(nz); stock = stock.dropna(subset=["薬品名"]).drop_duplicates("薬品名")
         excl = set(hand["発注除外"]["薬品名"].map(nz).dropna()) if len(hand["発注除外"]) else set()
         grp = hand["薬品グループ"].copy() if len(hand["薬品グループ"]) else pd.DataFrame(columns=["薬品名", "成分規格", "需要のまとまり", "先発後発"])
@@ -622,15 +638,13 @@ class Model:
                     "直近の払出合計", "直近の1日平均払出", "直近の在庫日数"]
         recs = []
         tr_map = dict(zip(trans["薬品名"], trans["経過措置期限"]))
-        st_map = {r["薬品名"]: (num(r.get("包装単位")), num(r.get("列数"))) for _, r in stock.iterrows()}
+        st_map = {r["薬品名"]: num(r.get("列数")) for _, r in stock.iterrows()}
         gr_map = {r["薬品名"]: r for _, r in grp.iterrows()}
         ab_map = {r["薬品名"]: r for _, r in abbr.iterrows()}
         sl_map = {r["品名"]: r for _, r in sl.iterrows()}
         for n in names:
             a, s_, p, m = ab_map.get(n), sl_map.get(n), plan_rows.get(n, {}), sui_rows.get(n, {})
-            pack, cols_n = st_map.get(n, (None, None))
-            per_day = m.get("1日平均払出")
-            eff_pack = std_pack if (pack is None or pack <= 0) else pack
+            cols_n = st_map.get(n)
             r = dict(薬品名=n, 略称=(a["略称"] if a is not None else None),
                      製剤=((s_["製剤"] if s_ is not None and s_["製剤"] else None) or (a["製剤_予定"] if a is not None else None)),
                      単位=(s_["単位"] if s_ is not None else None), 棚番=(s_["棚番"] if s_ is not None else None),
@@ -640,16 +654,13 @@ class Model:
                      システム最終払出日=(fudo[n]["最終払出日"] if n in fudo else None), システム在庫=(fudo[n]["数量"] if n in fudo else None),
                      薬価=(fudo[n]["薬価"] if n in fudo else None), YJコード=(fudo[n]["YJコード"] if n in fudo else None),
                      成分規格=(gr_map[n]["成分規格"] if n in gr_map else None), 需要のまとまり=(gr_map[n]["需要のまとまり"] if n in gr_map else None),
-                     先発後発=(gr_map[n]["先発後発"] if n in gr_map else None), 包装単位=pack, 列数=cols_n,
+                     先発後発=(gr_map[n]["先発後発"] if n in gr_map else None), 列数=cols_n,
                      出どころ=("予定・出納" if (p.get("予定日数", 0) or 0) > 0 and (m.get("動いた月数", 0) or 0) > 0
                                else "予定だけ" if (p.get("予定日数", 0) or 0) > 0 else "出納だけ"))
             for c in plan_cols:
                 r[c] = p.get(c)
             for c in sui_cols:
                 r[c] = m.get(c)
-            r["1箱消化日数"] = (eff_pack / per_day) if per_day else None
-            rp = m.get("直近の1日平均払出")
-            r["直近の1箱消化日数"] = (eff_pack / rp) if rp else None
             recs.append(r)
         df = pd.DataFrame(recs)
         return df.sort_values(["払出合計", "薬品名"], ascending=[False, True], na_position="last").reset_index(drop=True)
@@ -687,7 +698,7 @@ class Model:
     # ⑪
     def _reasons(self):
         S = self.s
-        still_m, over_d, box_d = S.num("不動とみなす月数"), S.num("在庫過多とみなす日数"), S.num("1箱消化の注意日数")
+        still_m, over_d = S.num("不動とみなす月数"), S.num("在庫過多とみなす日数")
         gap_r, gap_s, base = S.num("ずれの注意割合"), S.num("ずれの大きさの注意割合"), S.base_date
         codes = {c[0]: c for c in REASON_CODES}
         # まとまりの中で直近の払出が一番多い薬（経過措置品がここにいれば E04）
@@ -699,7 +710,7 @@ class Model:
         rows = []
         for _, r in self.M_薬品.iterrows():
             g = lambda k: (None if pd.isna(r[k]) else r[k])
-            stock = g("最終在庫") or 0; still = g("動きのない月数"); days = g("在庫日数"); box = g("1箱消化日数")
+            stock = g("最終在庫") or 0; still = g("動きのない月数"); days = g("在庫日数")
             less = g("その他の減少") or 0; adi = g("平均間隔"); typ = g("需要の型"); gr = g("ずれの割合"); gs = g("ずれの大きさ")
             trans = g("経過措置期限"); left = (trans - base).days if trans else None; out = g("払出合計") or 0
             hits = []
@@ -707,7 +718,6 @@ class Model:
             if days is not None and days >= over_d: hits.append(("S02", days, over_d))
             rdays = g("直近の在庫日数")
             if rdays is not None and rdays >= over_d: hits.append(("S05", rdays, over_d))
-            if box is not None and box >= box_d: hits.append(("S03", box, box_d))
             if less > 0: hits.append(("S04", less, None))
             if r["不動品リスト"] is True: hits.append(("S06", g("システム不動日数"), None))
             dmap = {"安定": "D01", "ばらつき大": "D02", "間欠": "D03", "まばら・大口": "D04"}

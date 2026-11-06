@@ -2,6 +2,8 @@
 使い方：python mcheck.py <組み立て済みの .txt>
   ・「// ===」の次の行が「// ◯ クエリ名：…」の見出しで、クエリを区切る
   ・文字列とコメントを除いてから、括弧の対応と let の束縛ごとの「名前 =」を数える
+  ・識別子に使えない文字（「・」「（」「／」など）を #"…" で囲まずに使っていないかを見る
+    （0.3.0 で Excel の解析エラーになった実例：切替・転送の案 = …）
   ・意味（列名・型・関数名の誤り）は見ない。Excel での動作確認の代わりにはならない
   ・問題があれば終了コード 1
 """
@@ -28,6 +30,20 @@ def strip(code):
     return "".join(out)
 ident = r'(#"S"|[^\W\d][\w]*)'
 bad = 0
+import unicodedata
+OK_CAT = {"Lu", "Ll", "Lt", "Lm", "Lo", "Nl", "Mn", "Mc", "Nd", "Pc", "Cf"}
+def bad_idents(code):
+    """裸の識別子のうち、M の識別子に使えない文字を含むもの（文字列・コメントは除いてから呼ぶ）"""
+    found = []
+    for w in re.findall(r'[^\s()\[\]{},;=<>+\-*/&!?"@]+', code):
+        if w.startswith("#"):
+            continue                      # #"S"、#date、#table など
+        if re.fullmatch(r"[\d.]+(e[+-]?\d+)?", w):
+            continue                      # 数値
+        for part in w.split("."):         # Table.Group のような点区切り
+            if part and any(unicodedata.category(c) not in OK_CAT for c in part):
+                found.append(w); break
+    return found
 for k in range(1, len(parts), 2):
     title = parts[k]; code = parts[k + 1]
     # drop trailing comment-only blocks
@@ -41,6 +57,8 @@ for k in range(1, len(parts), 2):
                 print("UNBALANCED", title, code[max(0, i-80):i+5]); bad += 1; break
             st.pop()
     if st: print("UNCLOSED", title, st[-1]); bad += 1
+    for w in bad_idents(code):
+        print("IDENT?", title, "|", w, "← #\"…\" で囲む"); bad += 1
     # top-level let bindings: depth-0 commas
     m = re.search(r"\blet\b", code)
     if not m: print("no let", title); continue
