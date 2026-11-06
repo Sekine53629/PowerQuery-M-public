@@ -18,10 +18,20 @@
 //      在庫日数       ：最終在庫 ÷ 1日平均払出（今の在庫で何日もつか）
 //      1箱消化日数    ：包装単位 ÷ 1日平均払出（包装単位は在庫情報、なければ設定の標準の包装単位）
 //      その他の減少   ：その他の増減のマイナス分の合計（返品・廃棄・移動など）
+//      直近の払出合計 ：出納のある月のうち新しい「直近の月数」ヶ月（設定、初期値 3）の払出の合計
+//      直近の1日平均払出：直近の払出合計 ÷ その月々の暦日数の合計
+//      直近の在庫日数 ：最終在庫 ÷ 直近の1日平均払出（全期間の平均は、途中で需要が落ちた薬を隠すため）
+//      直近の1箱消化日数：包装単位 ÷ 直近の1日平均払出
 //    【予定とのずれ】出納と予定の両方がある月から
 //      ずれの割合     ：（払出 － 予定）の合計 ÷ 予定の合計
 //      ずれの大きさ   ：月ごとの |払出 － 予定| の合計 ÷ 予定の合計（打ち消し合いを除いた大きさ）
 //      予定外の月数   ：予定が0なのに払出があった月の数（臨時・新患・他科だけで出た月）
+//    【そのほか】
+//      経過措置期限   ：⑳ 経過措置該当（エリシアSのリスト）を優先し、なければ手入力の経過措置リスト
+//      不動品リスト   ：㉑ 不動品リスト に載っている薬（出納の期間より前から動いていない薬もここで拾う）
+//      システム不動日数／システム最終払出日／システム在庫／薬価／YJコード：㉑ を薬ごとにまとめたもの
+//      供給状況       ：薬品グループの列（通常／限定／供給停止／経過措置／薬価削除予定。手入力）
+//      まとまり内で最多：同じ「需要のまとまり」（屋号が2つ以上）の中で、直近の払出が一番多い薬（E04 に使う）
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -29,6 +39,7 @@ let
                let v = Record.FieldOrDefault(Prm, key, null)
                in  if v = null or (v is text and Text.Trim(v) = "") then dflt else Number.From(v),
     StdPack = Num("標準の包装単位", 100),
+    RecentN = Number.RoundDown(Num("直近の月数", 3)),
 
     Day  = Table.Buffer(#"T_日次"),
     Mon  = Table.Buffer(#"T_月次"),
@@ -40,7 +51,9 @@ let
                 otherwise #table(cols, {}),
 
     // ---- 対象の薬：予定（T_日次）か出納（T_月次）に一度でも出てきた薬 ----
-    Names = List.Distinct(List.RemoveNulls(Day[薬品名] & Mon[薬品名])),
+    FudoSrc = #"不動品リスト",
+    KeikaSrc = #"経過措置該当",
+    Names = List.Distinct(List.RemoveNulls(Day[薬品名] & Mon[薬品名] & FudoSrc[薬品名] & KeikaSrc[薬品名])),
     Base  = Table.FromColumns({Names}, type table [薬品名 = text]),
 
     // ---- 属性：略称・製剤（実績で一番新しい日付のもの） ----
@@ -55,18 +68,29 @@ let
     SuiAttr = Table.ExpandRecordColumn(SuiLast, "r", {"製剤", "単位", "棚番", "コード", "品名の先頭空白"}),
 
     // ---- 属性：手入力テーブル（経過措置リスト・在庫情報・発注除外・薬品グループ） ----
-    Trans = Table.Distinct(Table.SelectRows(Table.TransformColumns(Hand("経過措置リスト", {"薬品名", "経過措置期限"}), {
+    TransHand = Table.Distinct(Table.SelectRows(Table.TransformColumns(Hand("経過措置リスト", {"薬品名", "経過措置期限"}), {
                 {"薬品名", Clean, type nullable text},
                 {"経過措置期限", each try Date.From(_) otherwise null, type nullable date}}),
                 each [薬品名] <> null), {"薬品名"}),
+    // エリシアSの経過措置薬品リスト（⑳）を優先し、手入力は補助
+    Trans = Table.Distinct(Table.Combine({Table.SelectColumns(KeikaSrc, {"薬品名", "経過措置期限"}), TransHand}), {"薬品名"}),
+    // 不動品リスト（㉑）を薬ごとにまとめる：最終払出日は一番新しいもの、不動日数はその日からの日数
+    Fudo = Table.Group(FudoSrc, {"薬品名"}, {
+               {"システム最終払出日", each List.Max([最終払出日]), type nullable date},
+               {"システム不動日数",   each List.Min([不動日数]), type nullable number},
+               {"システム在庫",       each List.Sum([数量]), type nullable number},
+               {"薬価",               each List.Max([薬価]), type nullable number},
+               {"YJコード",           each List.First(List.RemoveNulls([YJコード]), null), type nullable text}}),
+    FudoNames = List.Buffer(Fudo[薬品名]),
     Stock = Table.Distinct(Table.TransformColumns(Hand("在庫情報", {"薬品名", "包装単位", "列数"}), {
                 {"薬品名", Clean, type nullable text},
                 {"包装単位", each try Number.From(_) otherwise null, type nullable number},
                 {"列数", each try Number.From(_) otherwise null, type nullable number}}), {"薬品名"}),
     Excl  = List.Buffer(List.RemoveNulls(List.Transform(Hand("発注除外", {"薬品名"})[薬品名], Clean))),
-    Grp   = Table.Distinct(Table.TransformColumns(Hand("薬品グループ", {"薬品名", "成分規格", "需要のまとまり", "先発後発"}), {
+    Grp   = Table.Distinct(Table.TransformColumns(Hand("薬品グループ", {"薬品名", "成分規格", "需要のまとまり", "先発後発", "供給状況"}), {
                 {"薬品名", Clean, type nullable text}, {"成分規格", Clean, type nullable text},
-                {"需要のまとまり", Clean, type nullable text}, {"先発後発", Clean, type nullable text}}), {"薬品名"}),
+                {"需要のまとまり", Clean, type nullable text}, {"先発後発", Clean, type nullable text},
+                {"供給状況", Clean, type nullable text}}), {"薬品名"}),
 
     // ---- 予定の指標 ----
     DayN  = List.Count(List.Distinct(Day[日付])),
@@ -95,6 +119,9 @@ let
     MonN     = List.Count(SuiMonths),
     CalDays  = List.Sum(List.Transform(SuiMonths, (m) => Date.Day(Date.EndOfMonth(m)))),
     LatestM  = List.Max(SuiMonths),
+    // 直近 N ヶ月（出納のある月の並びで新しい方から）
+    RecentMonths = List.Buffer(List.LastN(List.Sort(SuiMonths), RecentN)),
+    RecentDays   = List.Sum(List.Transform(RecentMonths, (m) => Date.Day(Date.EndOfMonth(m)))) ?? 0,
     MonG = Table.Group(SuiMon, {"薬品名"}, {{"m", each
         let
             moved   = Table.SelectRows(_, each [出納に載った]),
@@ -106,7 +133,10 @@ let
             both    = Table.SelectRows(_, each [予定とのずれ] <> null),
             planSum = List.Sum(both[予定数量]) ?? 0,
             gapSum  = List.Sum(both[予定とのずれ]),
-            absSum  = List.Sum(List.Transform(both[予定とのずれ], Number.Abs))
+            absSum  = List.Sum(List.Transform(both[予定とのずれ], Number.Abs)),
+            rec     = Table.SelectRows(_, each List.Contains(RecentMonths, [月])),
+            recOut  = List.Sum(rec[払出数量]) ?? 0,
+            recPd   = if RecentDays > 0 then recOut / RecentDays else null
         in
             [動いた月数 = Table.RowCount(moved), 払出合計 = out,
              払出のあった月数 = List.Count(List.Select([払出数量], (x) => x <> null and x > 0)),
@@ -121,7 +151,9 @@ let
              比較月数 = Table.RowCount(both),
              ずれの割合 = if planSum > 0 then gapSum / planSum else null,
              ずれの大きさ = if planSum > 0 then absSum / planSum else null,
-             予定外の月数 = Table.RowCount(Table.SelectRows(both, each ([予定数量] ?? 0) = 0 and ([払出数量] ?? 0) > 0))],
+             予定外の月数 = Table.RowCount(Table.SelectRows(both, each ([予定数量] ?? 0) = 0 and ([払出数量] ?? 0) > 0)),
+             直近の払出合計 = recOut, #"直近の1日平均払出" = recPd,
+             直近の在庫日数 = if stock <> null and recPd <> null and recPd > 0 then stock / recPd else null],
         type record}}),
 
     // ---- つなぐ ----
@@ -132,18 +164,30 @@ let
              {"経過措置期限"}),
     J4 = Table.ExpandTableColumn(Table.NestedJoin(J3, {"薬品名"}, Stock, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"包装単位", "列数"}),
     J5 = Table.ExpandTableColumn(Table.NestedJoin(J4, {"薬品名"}, Grp, {"薬品名"}, "x", JoinKind.LeftOuter), "x",
-             {"成分規格", "需要のまとまり", "先発後発"}),
+             {"成分規格", "需要のまとまり", "先発後発", "供給状況"}),
     J6 = Table.ExpandTableColumn(Table.NestedJoin(J5, {"薬品名"}, DayG, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"m"}, {"予定"}),
     J7 = Table.ExpandTableColumn(Table.NestedJoin(J6, {"薬品名"}, MonG, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"m"}, {"出納"}),
 
     PlanCols = {"予定日数", "予定数量合計", "予定患者数合計", "最終予定日", "平均間隔", "ばらつき（CV²）", "需要の型", "1日平均予定"},
     SuiCols  = {"動いた月数", "払出合計", "払出のあった月数", "月平均払出", "1日平均払出", "仕入合計", "入庫の概算合計",
                 "その他の減少", "最後に動いた月", "最終在庫", "動きのない月数", "在庫日数",
-                "比較月数", "ずれの割合", "ずれの大きさ", "予定外の月数"},
+                "比較月数", "ずれの割合", "ずれの大きさ", "予定外の月数",
+                "直近の払出合計", "直近の1日平均払出", "直近の在庫日数"},
     E1 = Table.ExpandRecordColumn(Table.TransformColumns(J7, {{"予定", each _ ?? Record.FromList(List.Repeat({null}, List.Count(PlanCols)), PlanCols)}}), "予定", PlanCols),
     E2 = Table.ExpandRecordColumn(Table.TransformColumns(E1, {{"出納", each _ ?? Record.FromList(List.Repeat({null}, List.Count(SuiCols)), SuiCols)}}), "出納", SuiCols),
 
-    Fin = Table.AddColumn(E2, "f", each
+    // 同じまとまり（屋号が2つ以上）の中で直近の払出が一番多い薬
+    TopNames = List.Buffer(
+        Table.SelectRows(
+            Table.Group(Table.SelectRows(E2, each [需要のまとまり] <> null), {"需要のまとまり"}, {
+                {"n",   each Table.RowCount(_), Int64.Type},
+                {"top", each Table.First(Table.Sort(_, {{"直近の払出合計", Order.Descending}}))[薬品名], type text}}),
+            each [n] >= 2)[top]),
+
+    J8 = Table.ExpandTableColumn(Table.NestedJoin(E2, {"薬品名"}, Fudo, {"薬品名"}, "x", JoinKind.LeftOuter), "x",
+             {"システム最終払出日", "システム不動日数", "システム在庫", "薬価", "YJコード"}),
+
+    Fin = Table.AddColumn(J8, "f", each
         let
             pack = if [包装単位] = null or [包装単位] <= 0 then StdPack else [包装単位],
             perDay = [#"1日平均払出"]
@@ -154,13 +198,17 @@ let
              // 動いた月数は、予定だけの薬でも 0 で入るので「> 0」で見る
              出どころ = if ([予定日数] ?? 0) > 0 and ([動いた月数] ?? 0) > 0 then "予定・出納"
                         else if ([予定日数] ?? 0) > 0 then "予定だけ" else "出納だけ",
-             #"1箱消化日数" = if perDay <> null and perDay > 0 then pack / perDay else null]),
-    F2 = Table.ExpandRecordColumn(Fin, "f", {"製剤_表示", "経過措置", "発注除外", "出どころ", "1箱消化日数"}),
+             #"1箱消化日数" = if perDay <> null and perDay > 0 then pack / perDay else null,
+             #"直近の1箱消化日数" = if [#"直近の1日平均払出"] <> null and [#"直近の1日平均払出"] > 0 then pack / [#"直近の1日平均払出"] else null,
+             まとまり内で最多 = List.Contains(TopNames, [薬品名]),
+             不動品リスト = List.Contains(FudoNames, [薬品名])]),
+    F2 = Table.ExpandRecordColumn(Fin, "f", {"製剤_表示", "経過措置", "発注除外", "出どころ", "1箱消化日数", "直近の1箱消化日数", "まとまり内で最多", "不動品リスト"}),
 
     Out = Table.SelectColumns(F2, {
               "薬品名", "略称", "製剤_表示", "単位", "棚番", "コード", "品名の先頭空白",
               "経過措置", "経過措置期限", "発注除外", "成分規格", "需要のまとまり", "先発後発",
-              "包装単位", "列数", "出どころ"} & PlanCols & SuiCols & {"1箱消化日数"}),
+              "包装単位", "列数", "出どころ", "供給状況"} & PlanCols & SuiCols & {"1箱消化日数", "直近の1箱消化日数", "まとまり内で最多",
+              "不動品リスト", "システム不動日数", "システム最終払出日", "システム在庫", "薬価", "YJコード"}),
     Ren = Table.RenameColumns(Out, {{"製剤_表示", "製剤"}}),
     Typed = Table.TransformColumnTypes(Ren, {
               {"略称", type text}, {"製剤", type text}, {"単位", type text}, {"棚番", type text}, {"コード", type text},
@@ -175,7 +223,11 @@ let
               {"入庫の概算合計", type number}, {"その他の減少", type number}, {"最後に動いた月", type date},
               {"最終在庫", type number}, {"動きのない月数", Int64.Type}, {"在庫日数", type number},
               {"比較月数", Int64.Type}, {"ずれの割合", Percentage.Type}, {"ずれの大きさ", Percentage.Type},
-              {"予定外の月数", Int64.Type}, {"1箱消化日数", type number}}),
+              {"予定外の月数", Int64.Type}, {"1箱消化日数", type number},
+              {"供給状況", type text}, {"直近の払出合計", type number}, {"直近の1日平均払出", type number},
+              {"直近の在庫日数", type number}, {"直近の1箱消化日数", type number}, {"まとまり内で最多", type logical},
+              {"不動品リスト", type logical}, {"システム不動日数", type number}, {"システム最終払出日", type date},
+              {"システム在庫", type number}, {"薬価", type number}, {"YJコード", type text}}),
     Result = Table.Sort(Typed, {{"払出合計", Order.Descending}, {"薬品名", Order.Ascending}})
 in
     Result

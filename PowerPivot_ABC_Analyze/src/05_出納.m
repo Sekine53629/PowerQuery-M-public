@@ -12,7 +12,8 @@
 //    ・出納に載るのは、その月に何かしら動いた薬だけ（動きのない薬は載らない）
 //    ・その他の増減 ＝ 在庫数量 －（繰越数量 ＋ 仕入数量 － 払出数量）
 //        マイナス：返品・廃棄・店舗間移動・譲渡など　プラス：移動の受け入れ・棚卸の調整など
-//    ・品名の先頭空白：品名の前の空白の数（意味は未確認のため残しておく）
+//    ・品名の記号：品名の先頭の「劇 」「向 」など（劇薬・向精神薬の印。記号がない薬は先頭が空白 3 つ）。
+//      照合のため 品名 からは記号と先頭の空白を外す。品名の先頭空白はその空白の数（記号がない薬で 3）
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -31,7 +32,7 @@ let
     Cols = {"製剤コード", "製剤", "コード", "品名", "繰越数量", "仕入数量", "払出数量", "在庫数量", "単位", "棚番"},
     OutType = type table [期間開始 = date, 期間終了 = date, 日数 = Int64.Type,
                           製剤コード = nullable text, 製剤 = nullable text, コード = nullable text,
-                          品名 = text, 品名の先頭空白 = Int64.Type,
+                          品名 = text, 品名の先頭空白 = Int64.Type, 品名の記号 = nullable text,
                           繰越数量 = nullable number, 仕入数量 = nullable number, 払出数量 = nullable number,
                           在庫数量 = nullable number, その他の増減 = nullable number,
                           単位 = nullable text, 棚番 = nullable text, ファイル名 = text],
@@ -146,13 +147,25 @@ let
     Lead = (val as any) as number =>
         if val = null then 0
         else let s = Text.From(val) in Text.Length(s) - Text.Length(Text.TrimStart(s, {" ", "　"})),
+    // 品名の先頭の記号（劇 ／向 など 1 文字＋空白）を外す
+    Marks = {"劇", "向", "毒", "麻", "覚", "習", "生"},
+    MarkOf = (val as any) as nullable text =>
+        let s = if val = null then null else Nz(Text.From(val))
+        in  if s <> null and Text.Length(s) >= 2 and List.Contains(Marks, Text.Start(s, 1)) and Text.Middle(s, 1, 1) = " "
+            then Text.Start(s, 1) else null,
+    NameOf = (val as any) as nullable text =>
+        let s = if val = null then null else Nz(Text.From(val))
+        in  if s = null then null
+            else if MarkOf(s) <> null then (let t = Text.Trim(Text.Range(s, 2)) in if t = "" then null else t)
+            else s,
 
-    WithLead = Table.AddColumn(Combined, "品名の先頭空白", each Lead([品名]), Int64.Type),
+    WithLead = Table.AddColumn(Table.AddColumn(Combined, "品名の先頭空白", each Lead([品名]), Int64.Type),
+                   "品名の記号", each MarkOf([品名]), type nullable text),
     Typed = Table.TransformColumns(WithLead, {
                 {"製剤コード", Txt, type nullable text},
                 {"製剤",       each if _ = null then null else Nz(_), type nullable text},
                 {"コード",     Txt, type nullable text},
-                {"品名",       each if _ = null then null else Nz(_), type nullable text},
+                {"品名",       NameOf, type nullable text},
                 {"繰越数量",   Num, type nullable number},
                 {"仕入数量",   Num, type nullable number},
                 {"払出数量",   Num, type nullable number},
@@ -170,7 +183,7 @@ let
     Days = Table.AddColumn(Diff, "日数", each Duration.Days([期間終了] - [期間開始]) + 1, Int64.Type),
 
     Ordered = Table.SelectColumns(Days, {"期間開始", "期間終了", "日数", "製剤コード", "製剤", "コード", "品名",
-                  "品名の先頭空白", "繰越数量", "仕入数量", "払出数量", "在庫数量", "その他の増減", "単位", "棚番", "ファイル名"}),
+                  "品名の先頭空白", "品名の記号", "繰越数量", "仕入数量", "払出数量", "在庫数量", "その他の増減", "単位", "棚番", "ファイル名"}),
     Result  = Value.ReplaceType(Ordered, OutType)
 in
     Result

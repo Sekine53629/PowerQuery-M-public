@@ -4,6 +4,7 @@
 //    ・値：その薬の数字（文言の {値}）　線：判定に使った設定の値（文言の {線}）
 //    ・基準日：設定の発注日（空欄なら今日）。経過措置の残り日数に使う
 //    ・線は設定テーブルで変える（下の Num の第2引数は空欄のときの仮の値）
+//    ・S05：直近の在庫日数（M_薬品）で判定。E04：経過措置品がまとまりの中で一番出ている（M_薬品「まとまり内で最多」）
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -34,11 +35,15 @@ let
             gs    = r[ずれの大きさ],
             trans = r[経過措置期限],
             left  = if trans = null then null else Duration.Days(trans - BaseDate),
-            out   = r[払出合計] ?? 0
+            out   = r[払出合計] ?? 0,
+            rdays = r[直近の在庫日数],
+            topG  = r[まとまり内で最多] = true
         in
             List.RemoveNulls({
                 if stock > 0 and still <> null and still >= StillMonths then {"S01", still, StillMonths} else null,
                 if days <> null and days >= OverDays then {"S02", days, OverDays} else null,
+                if rdays <> null and rdays >= OverDays then {"S05", rdays, OverDays} else null,
+                if r[不動品リスト] = true then {"S06", r[システム不動日数], null} else null,
                 if box <> null and box >= BoxDays then {"S03", box, BoxDays} else null,
                 if less > 0 then {"S04", less, null} else null,
                 if typ = "安定" then {"D01", adi, null}
@@ -52,6 +57,7 @@ let
                 if left <> null and left >= 0 then {"E01", left, null} else null,
                 if left <> null and left < 0 then {"E02", -left, null} else null,
                 if r[発注除外] = true and out > 0 then {"E03", out, null} else null,
+                if trans <> null and topG then {"E04", null, null} else null,
                 if r[出どころ] = "出納だけ" then {"Q01", null, null} else null,
                 if r[出どころ] = "予定だけ" then {"Q02", null, null} else null
             }),
