@@ -627,24 +627,48 @@ def parse_drug_name(name):
                 先発後発案=("後発" if brand is not None else None), 確からしさ=conf)
 
 
-def propose_groups(m_drug):
+def propose_groups(m_drug, adj_names=None):
+    """薬品グループ案（㉕）。載せるのは、まとめる必要のある薬だけ（0.8.0）：
+       同じまとまり（案）が 2 品目以上／経過措置／出荷調整の疑い（adj_names：⑬ の最新月の G01・G02 の薬品名）／
+       供給状況が通常以外／切替先あり・切替先に指定／上の薬と同じまとまり（案）。
+       先頭 6 列は手入力テーブル 薬品グループ と同じ並び（薬品名・成分規格・需要のまとまり・先発後発・供給状況・切替先）"""
+    adj_names = adj_names or set()
+    cols = ["薬品名", "成分規格", "需要のまとまり", "先発後発", "供給状況", "切替先", "載せた理由", "確からしさ", "同じまとまりの屋号数",
+            "略称", "成分（案）", "剤形", "規格", "屋号", "需要のまとまり（案）", "未登録", "違い"]
     rows = []
     for _, r in m_drug.iterrows():
         p = parse_drug_name(r["薬品名"])
-        rows.append(dict(薬品名=r["薬品名"], 略称=r["略称"], **p, 登録済みのまとまり=(r["需要のまとまり"] if isinstance(r["需要のまとまり"], str) else None)))
-    cols = ["薬品名", "略称", "成分（案）", "剤形", "規格", "屋号", "成分規格（案）", "需要のまとまり（案）", "先発後発（案）", "確からしさ",
-            "同じまとまりの屋号数", "登録済みのまとまり", "未登録", "違い"]
+        g = lambda k: (r[k] if k in r.index and isinstance(r[k], str) else None)
+        rows.append(dict(薬品名=r["薬品名"], 略称=g("略称"), **p, 登録済みのまとまり=g("需要のまとまり"), 登録_成分規格=g("成分規格"),
+                         登録_先発後発=g("先発後発"), 供給状況=g("供給状況"), 切替先=g("切替先"), 切替元=g("切替元"),
+                         経過措置=bool(r["経過措置"]) if "経過措置" in r.index else False))
     if not rows:
         return pd.DataFrame(columns=cols)
     df = pd.DataFrame(rows)
     cnt = df["まとまり案"].value_counts()
     df["同じまとまりの屋号数"] = df["まとまり案"].map(lambda g: int(cnt[g]) if isinstance(g, str) else None)
-    df["未登録"] = df["登録済みのまとまり"].map(lambda g: "" if isinstance(g, str) else "○")
     sq = lambda t: (nz(t) or "").replace(" ", "").replace("　", "")
+
+    def reason(r):
+        out = []
+        if (r["同じまとまりの屋号数"] or 0) >= 2: out.append(f"同じ成分規格が {int(r['同じまとまりの屋号数'])} 品目")
+        if r["経過措置"]: out.append("経過措置")
+        if r["薬品名"] in adj_names: out.append("出荷調整の疑い")
+        if r["供給状況"] and r["供給状況"] != "通常": out.append(r["供給状況"])
+        if r["切替先"] or r["切替元"]: out.append("切替")
+        return "、".join(out)
+    df["理由1"] = df.apply(reason, axis=1)
+    hit = set(df.loc[(df["理由1"] != "") & df["まとまり案"].notna(), "まとまり案"])
+    df["載せた理由"] = [a if a else ("同じ成分規格の候補" if isinstance(b, str) and b in hit else "") for a, b in zip(df["理由1"], df["まとまり案"])]
+    df = df[df["載せた理由"] != ""].copy()
+    df["成分規格"] = [a or b for a, b in zip(df["登録_成分規格"], df["成分規格案"])]
+    df["需要のまとまり"] = [a or b for a, b in zip(df["登録済みのまとまり"], df["まとまり案"])]
+    df["先発後発"] = [a or b for a, b in zip(df["登録_先発後発"], df["先発後発案"])]
+    df["未登録"] = df["登録済みのまとまり"].map(lambda g: "" if isinstance(g, str) else "○")
     df["違い"] = [("○" if isinstance(a, str) and isinstance(b, str) and sq(a) != sq(b) else "") for a, b in zip(df["登録済みのまとまり"], df["まとまり案"])]
     df["並び"] = df["まとまり案"].map(lambda g: 0 if isinstance(g, str) else 1)
-    df = df.sort_values(["並び", "まとまり案", "薬品名"], na_position="last").drop(columns="並び")
-    df = df.rename(columns={"成分案": "成分（案）", "成分規格案": "成分規格（案）", "まとまり案": "需要のまとまり（案）", "先発後発案": "先発後発（案）"})
+    df = df.sort_values(["並び", "まとまり案", "薬品名"], na_position="last")
+    df = df.rename(columns={"成分案": "成分（案）", "まとまり案": "需要のまとまり（案）"})
     return df[cols].reset_index(drop=True)
 
 

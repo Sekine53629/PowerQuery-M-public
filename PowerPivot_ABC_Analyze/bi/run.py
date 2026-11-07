@@ -436,6 +436,11 @@ def main():
     abc_m = abc_monthly(model, settings)
     R = dict(R1=r1_abc(model, settings, abc_m), R2=r2_dead(model, settings), R3=r3_expiry(model, settings), R4=r4_shortage(model, settings),
              R5=r5_order(model, settings))
+    # 薬品グループ案：出荷調整の疑い（R4 の最新月の G01・G02）も載せる理由に入れる
+    from model import propose_groups
+    r4 = R["R4"]
+    adj = set(r4.loc[r4["月"] == r4["月"].max(), "薬品名"]) if len(r4) else set()
+    model.薬品グループ案 = propose_groups(model.M_薬品, adj)
     K = dict(K0=k0_summary(model, settings, abc_m), K1=k1_stock_bins(model), K2=k2_quadrant(model, settings), K4=k4_loss(model), K6=k6_share(model))
     sheets = [("T_日次", model.T_日次), ("T_月次", model.T_月次), ("M_日付", model.M_日付), ("M_薬品", model.M_薬品),
               ("M_理由コード", model.M_理由コード), ("T_判定理由", model.T_判定理由), ("T_ロット", model.T_ロット), ("T_ABC月次", abc_m),
