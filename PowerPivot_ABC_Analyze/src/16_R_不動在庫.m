@@ -7,6 +7,7 @@
 //        同じまとまりの別の屋号が動いていて、直近の在庫日数 ≧ 転送候補の在庫日数 → 他店へ転送／
 //        在庫日数 ≧ 転送候補の在庫日数 → 他店へ転送か返品／それ以外 → 様子見（発注を止める）
 //    ※ 処置の案は目安。最終判断は現場
+//    ・種類：不動／在庫過多（0.6.1 で「区分」から改名。区分 は M_薬品 の A／B／C／D）
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -44,14 +45,14 @@ let
                       else if rdays <> null and rdays >= TransferD then "他店へ転送か返品"
                       else "様子見（発注を止める）"
         in
-            [区分 = if dead then "不動" else "在庫過多", 並び = if dead then 0 else 1,
+            [種類 = if dead then "不動" else "在庫過多", 並び = if dead then 0 else 1,
              余った量 = surplus, 処置の案 = act]),
-    E      = Table.ExpandRecordColumn(Calc, "計算", {"区分", "並び", "余った量", "処置の案"}),
-    Out    = Table.SelectColumns(E, {"区分", "薬品名", "略称", "棚番", "需要のまとまり", "最終在庫", "最後に動いた月", "動きのない月数",
+    E      = Table.ExpandRecordColumn(Calc, "計算", {"種類", "並び", "余った量", "処置の案"}),
+    Out    = Table.SelectColumns(E, {"種類", "薬品名", "略称", "区分", "棚番", "需要のまとまり", "最終在庫", "最後に動いた月", "動きのない月数",
                  "システム不動日数", "システム最終払出日", "在庫日数", "直近の在庫日数", "直近の1日平均払出", "余った量", "処置の案", "並び"}),
     Ren    = Table.RenameColumns(Out, {{"最終在庫", "在庫"}}),
     Typed  = Table.TransformColumnTypes(Ren, {
-                 {"区分", type text}, {"薬品名", type text}, {"略称", type text}, {"棚番", type text}, {"需要のまとまり", type text},
+                 {"種類", type text}, {"薬品名", type text}, {"略称", type text}, {"区分", type text}, {"棚番", type text}, {"需要のまとまり", type text},
                  {"在庫", type number}, {"最後に動いた月", type date}, {"動きのない月数", Int64.Type},
                  {"システム不動日数", type number}, {"システム最終払出日", type date}, {"在庫日数", type number},
                  {"直近の在庫日数", type number}, {"直近の1日平均払出", type number}, {"余った量", type number},
