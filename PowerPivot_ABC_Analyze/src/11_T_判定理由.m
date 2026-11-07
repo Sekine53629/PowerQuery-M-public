@@ -5,7 +5,8 @@
 //    ・基準日：設定の発注日（空欄なら今日）。経過措置の残り日数に使う
 //    ・線は設定テーブルで変える（下の Num の第2引数は空欄のときの仮の値）
 //    ・S05：直近の在庫日数（M_薬品）で判定。E04：経過措置品がまとまりの中で一番出ている（M_薬品「まとまり内で最多」）
-//    ・D06：区分 D（患者が極端に少ない。M_薬品「区分」「患者の最少月」。0.5.0）。出納だけの薬は Q01 のまま
+//    ・D06：区分 D（患者が極端に少ない。M_薬品「区分」「患者の最少月」。0.5.0）。出納だけの薬は Q01 のまま。切替元は E05 だけ
+//    ・E05／E06：薬品グループの 切替先（0.7.0）。切替元には E05（使い切り日数）、切替先には E06（切替元の在庫）
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -50,7 +51,7 @@ let
                 else if typ = "間欠" then {"D03", adi, null}
                 else if typ = "まばら・大口" then {"D04", adi, null} else null,
                 if (r[予定外の月数] ?? 0) >= 1 then {"D05", r[予定外の月数], 1} else null,
-                if r[区分] = "D" and r[出どころ] <> "出納だけ" then {"D06", r[患者の最少月], DLine} else null,
+                if r[区分] = "D" and r[出どころ] <> "出納だけ" and r[切替先] = null then {"D06", r[患者の最少月], DLine} else null,
                 if gr <> null and gr >= GapRate then {"P01", gr * 100, GapRate * 100} else null,
                 if gr <> null and gr <= -GapRate then {"P02", -gr * 100, GapRate * 100} else null,
                 if gs <> null and gs >= GapSize then {"P03", gs * 100, GapSize * 100} else null,
@@ -58,12 +59,14 @@ let
                 if left <> null and left < 0 then {"E02", -left, null} else null,
                 if r[発注除外] = true and out > 0 then {"E03", out, null} else null,
                 if trans <> null and topG then {"E04", null, null} else null,
+                if r[切替先] <> null then {"E05", r[切替の使い切り日数], null} else null,
+                if r[切替元] <> null then {"E06", r[切替元の在庫], null} else null,
                 if r[出どころ] = "出納だけ" then {"Q01", null, null} else null,
                 if r[出どころ] = "予定だけ" then {"Q02", null, null} else null
             }),
 
     Rows = List.Combine(Table.TransformRows(Drugs, (r) =>
-               List.Transform(Hits(r), (h) => [薬品名 = r[薬品名], コード = h{0}, 値 = h{1}, 線 = h{2}, 在庫 = r[最終在庫]]))),
+               List.Transform(Hits(r), (h) => [薬品名 = r[薬品名], コード = h{0}, 値 = h{1}, 線 = h{2}, 在庫 = r[最終在庫] ?? 0]))),
     T    = Table.FromRecords(Rows, type table [薬品名 = text, コード = text, 値 = nullable number, 線 = nullable number, 在庫 = nullable number]),
 
     // 文言を作る：{値} {線} {在庫} を数字に置き換える

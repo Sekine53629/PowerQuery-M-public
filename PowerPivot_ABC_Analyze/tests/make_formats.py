@@ -138,7 +138,7 @@ def check():
     import model
     import pandas as pd
     skip = {"ファイル名", "シート名"}
-    names = ["日次データ", "予測データ", "出納", "経過措置該当", "期限切れリスト", "不動品リスト", "T_日次", "T_月次", "T_ABC月次", "M_薬品", "T_ロット", "T_判定理由"]
+    names = ["日次データ", "予測データ", "出納", "経過措置該当", "期限切れリスト", "不動品リスト", "T_日次", "T_月次", "T_ABC月次", "M_薬品", "薬品グループ案", "T_ロット", "T_判定理由"]
     base = model.Model(model.Settings(os.path.join(OUT, "手入力テーブル.xlsx")))
     bad = 0
     for kind in ("xls", "csv", "txt"):

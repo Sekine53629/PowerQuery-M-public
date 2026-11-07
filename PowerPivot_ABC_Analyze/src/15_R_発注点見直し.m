@@ -2,7 +2,7 @@
 // ⑮ クエリ名：R_発注点見直し（シート「A_発注点」に表として読み込む）
 //    A 発注点の切り替え提案：区分が前月から変わった、または直近 N ヶ月の払出が前の N ヶ月から
 //    設定「発注点見直しの変化」（初期値 0.2＝±20%）以上動いた「需要のまとまり」だけを載せる
-//    ・代表の薬：まとまりの中で直近の払出が一番多い薬（供給状況が「通常」以外の屋号は後回し）
+//    ・代表の薬：まとまりの中で直近の払出が一番多い薬（切替先に指定された薬を優先、供給状況が「通常」以外と切替元は後回し）
 //    ・発注点の目安 ＝ 直近の1日平均払出 × 設定「発注点の日数」（切り上げ）
 //    ・発注量の目安 ＝ 直近の1日平均払出 × 設定「発注量の日数」（切り上げ）
 //    ・持ち方：回転（直近の1日平均払出 × 30 ≧ 設定「極小需要の月の払出」）× 予測できる（ずれの大きさ < 予測できるずれの線）
@@ -47,7 +47,10 @@ let
                          in  if Table.IsEmpty(r) then 0 else r{0}[払出]), type list}}),
 
     // ---- 代表の薬（供給状況が通常以外は後回し、直近の払出が多い順） ----
-    Rep    = Table.Group(Table.AddColumn(DrugK, "k", each if [供給状況] = null or [供給状況] = "通常" then 0 else 1, Int64.Type),
+    Rep    = Table.Group(Table.AddColumn(DrugK, "k", each
+                 if [切替元] <> null then 0
+                 else if [切替先] <> null then 3
+                 else if [供給状況] = null or [供給状況] = "通常" then 1 else 2, Int64.Type),
                  {"まとまり"}, {
                  {"屋号数", each Table.RowCount(_), Int64.Type},
                  {"r", each Table.First(Table.Sort(_, {{"k", Order.Ascending}, {"直近の払出合計", Order.Descending}})), type record}}),

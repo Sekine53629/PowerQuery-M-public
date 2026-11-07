@@ -11,8 +11,8 @@
 //    ・必要な最大在庫：1 年の日次の予定を「納品と納品の間」（注文は翌営業日に届くとして、同じ次の納品日を持つ日々）で
 //        区切った合計のいちばん大きいもの × (1 ＋ ずれ)。連休でも不足しない在庫の上限の目安（区分 A の薬の管理用）。
 //        卸の営業日は ④ fx_卸の休み（土日・祝日・年末年始・追加休業日）
-//    ・判定：発注しない ＝ 発注除外／供給状況が 供給停止・薬価削除予定（目安は 0）
-//            控えめに   ＝ 区分 D／経過措置品／供給状況 限定／予定より「ずれの注意割合」以上少なく出る薬で、目安 > 0
+//    ・判定：発注しない ＝ 発注除外／供給状況が 供給停止・薬価削除予定／切替元（薬品グループの 切替先 あり。0.7.0）（目安は 0）
+//            控えめに   ＝ 区分 D／経過措置品／供給状況 限定／予定より「ずれの注意割合」以上少なく出る薬／切替先で、目安 > 0
 //            発注する   ＝ それ以外で目安 > 0　　不要 ＝ 目安 0
 //    ・注意：限定出荷／出荷調整の疑い（⑬ G01・G02）／期限の近いロットを先に使う（⑭ 残り日数 ≦ 期限切迫の日数 か 返す量 > 0）／
 //            予定より n% 少なく出る／患者が少ない（区分 D）／経過措置品／予定にない薬／上限を超える（区分 A で 在庫＋目安 > 必要な最大在庫）
@@ -85,8 +85,8 @@ let
             cls     = r[区分],
             sup     = r[供給状況],
             excl    = r[発注除外] = true,
-            noOrder = excl or sup = "供給停止" or sup = "薬価削除予定",
-            careful = cls = "D" or r[経過措置] = true or sup = "限定" or gap <= -GapRate,
+            noOrder = excl or sup = "供給停止" or sup = "薬価削除予定" or r[切替先] <> null,
+            careful = cls = "D" or r[経過措置] = true or sup = "限定" or gap <= -GapRate or r[切替元] <> null,
             oq      = if noOrder then 0 else Number.RoundUp(Number.Round(List.Max({0, exp - stock}), 6)),
             overCap = cls = "A" and maxQ > 0 and stock + oq > maxQ,
             notes   = List.RemoveNulls({
@@ -99,6 +99,8 @@ let
                           if cls = "D" then "患者が少ない（区分 D）" else null,
                           if r[経過措置] = true then "経過措置品（切替先があれば発注しない）" else null,
                           if r[出どころ] = "出納だけ" then "予定にない薬" else null,
+                          if r[切替先] <> null then "切替元（「" & r[切替先] & "」へ寄せる。在庫を使い切る）" else null,
+                          if r[切替元] <> null then "切替先（切替元の在庫 " & F(r[切替元の在庫]) & " を使い切るまで控えめに）" else null,
                           if overCap then "上限を超える（在庫＋目安 " & F(stock + oq) & " ＞ " & F(maxQ) & "）" else null}),
             note    = Text.Combine(notes, "、"),
             verdict = if noOrder then "発注しない"

@@ -543,8 +543,11 @@ REASON_CODES = [
     ("D03", "需要", "情報", 3, "需要は間欠的です。（平均 {値}日に1回）"),
     ("D04", "需要", "注意", 2, "需要はまばらで、出るときは大口です。（平均 {値}日に1回）"),
     ("D05", "需要", "注意", 2, "予定にない払出だけの月が {値}ヶ月あります。（臨時・新患・他科）"),
-    # 0.5.0：区分 D（患者が極端に少ない。出納だけの薬は Q01 のまま）
+    # 0.5.0：区分 D（患者が極端に少ない。出納だけの薬は Q01 のまま。切替元は E05 だけ）
     ("D06", "需要", "注意", 2, "予定の患者が月 {値}人しかいません。（線 {線}人）区分 D：在庫は手で管理する薬です"),
+    # 0.7.0：薬品グループの 切替先
+    ("E05", "期限・制度", "注意", 2, "切替元です。在庫 {在庫} は切替先の需要で {値}日で使い切る見込みです。返品できる分は返品してください。"),
+    ("E06", "期限・制度", "注意", 2, "切替先です。切替元の在庫 {値} がなくなるまで、発注は控えめにしてください。"),
     ("P01", "予定とのずれ", "注意", 2, "予定より {値}% 多く出ています。（臨時・飛び処方・再来局）"),
     ("P02", "予定とのずれ", "注意", 2, "予定より {値}% 少なく出ています。（処方終了・残薬調整）"),
     ("P03", "予定とのずれ", "情報", 3, "月ごとに予定と {値}% ずれます。"),
@@ -567,6 +570,82 @@ REASON_CODES = [
 
 def fmt0(n):
     return "" if n is None or (isinstance(n, float) and math.isnan(n)) else f"{round(n):,}"
+
+
+# ------------------------------------------------------------------------------
+# 薬品グループ案（㉕）：薬品名を 成分＋剤形＋規格「屋号」 に分解して、需要のまとまりの案を出す（0.7.0）
+# ------------------------------------------------------------------------------
+FORMS = ["口腔内崩壊錠", "フィルムコーティング錠", "チュアブル錠", "徐放錠", "腸溶錠", "糖衣錠", "OD錠", "錠",
+         "カプセル", "ドライシロップ", "シロップ", "点眼液", "点鼻液", "吸入液", "内用液", "液",
+         "細粒", "顆粒", "散", "テープ", "パップ", "ゲル", "軟膏", "クリーム", "ローション", "坐剤", "注"]
+TABLET_FORMS = {"口腔内崩壊錠", "フィルムコーティング錠", "チュアブル錠", "徐放錠", "腸溶錠", "糖衣錠", "OD錠", "錠", "カプセル"}
+UNIT_CHARS = set("0123456789.mgμµLl%/単位")
+CLOSERS = {"]": "[", ")": "(", "）": "（", "】": "【", "〕": "〔"}
+
+
+def _strip_tail(s):
+    s = s.strip()
+    while s and s[-1] in CLOSERS:
+        p = s.rfind(CLOSERS[s[-1]])
+        if p < 0:
+            break
+        s = s[:p].strip()
+    return s
+
+
+def parse_drug_name(name):
+    """戻り値：成分案／剤形／規格／屋号／成分規格案／まとまり案／先発後発案／確からしさ（㉕ と同じ決まり）"""
+    n0 = nz(name) or ""
+    has_b = "「" in n0 and "」" in n0
+    brand = n0[n0.index("「") + 1:n0.index("」")].strip() if has_b else None
+    core = _strip_tail(n0[:n0.index("「")] if has_b else n0)
+    dpos = next((i for i, c in enumerate(core) if c.isdigit()), -1)
+    run = ""
+    if dpos >= 0:
+        for c in core[dpos:]:
+            if c in UNIT_CHARS:
+                run += c
+            else:
+                break
+    str0 = run.rstrip("/.").replace("µ", "μ")
+    ok_str = bool(str0) and any(c.isdigit() for c in str0) and str0 != "".join(c for c in str0 if c.isdigit() or c == ".")
+    head = (core if dpos < 0 else core[:dpos]).strip()
+    form = next((f for f in FORMS if head.endswith(f)), None)
+    ingr = (head[:-len(form)] if form else head).replace(" ", "").replace("　", "")
+    tablet = form is not None and form in TABLET_FORMS
+    grp = None if (not ingr or not ok_str or form is None) else (f"{ingr} {str0}" if tablet else f"{ingr}{form} {str0}")
+    spec = None if not ingr else f"{ingr}{form or ''}{str0 if ok_str else ''}"
+    if brand is not None and form is not None and ok_str:
+        conf = "後発（屋号あり）"
+    elif brand is None and form is not None and ok_str:
+        conf = "要確認：屋号なし（先発か旧名称。成分名で結ぶ）"
+    elif form is None:
+        conf = "要確認：剤形が読めない"
+    else:
+        conf = "要確認：規格が読めない"
+    return dict(成分案=(ingr or None), 剤形=form, 規格=(str0 if ok_str else None), 屋号=brand, 成分規格案=spec, まとまり案=grp,
+                先発後発案=("後発" if brand is not None else None), 確からしさ=conf)
+
+
+def propose_groups(m_drug):
+    rows = []
+    for _, r in m_drug.iterrows():
+        p = parse_drug_name(r["薬品名"])
+        rows.append(dict(薬品名=r["薬品名"], 略称=r["略称"], **p, 登録済みのまとまり=(r["需要のまとまり"] if isinstance(r["需要のまとまり"], str) else None)))
+    cols = ["薬品名", "略称", "成分（案）", "剤形", "規格", "屋号", "成分規格（案）", "需要のまとまり（案）", "先発後発（案）", "確からしさ",
+            "同じまとまりの屋号数", "登録済みのまとまり", "未登録", "違い"]
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(rows)
+    cnt = df["まとまり案"].value_counts()
+    df["同じまとまりの屋号数"] = df["まとまり案"].map(lambda g: int(cnt[g]) if isinstance(g, str) else None)
+    df["未登録"] = df["登録済みのまとまり"].map(lambda g: "" if isinstance(g, str) else "○")
+    sq = lambda t: (nz(t) or "").replace(" ", "").replace("　", "")
+    df["違い"] = [("○" if isinstance(a, str) and isinstance(b, str) and sq(a) != sq(b) else "") for a, b in zip(df["登録済みのまとまり"], df["まとまり案"])]
+    df["並び"] = df["まとまり案"].map(lambda g: 0 if isinstance(g, str) else 1)
+    df = df.sort_values(["並び", "まとまり案", "薬品名"], na_position="last").drop(columns="並び")
+    df = df.rename(columns={"成分案": "成分（案）", "成分規格案": "成分規格（案）", "まとまり案": "需要のまとまり（案）", "先発後発案": "先発後発（案）"})
+    return df[cols].reset_index(drop=True)
 
 
 # ------------------------------------------------------------------------------
@@ -634,6 +713,7 @@ class Model:
         self.M_日付 = self._m_date()
         self.M_理由コード = pd.DataFrame(REASON_CODES, columns=["コード", "分類", "種類", "優先度", "文言"])
         self.M_薬品 = self._m_drug()
+        self.薬品グループ案 = propose_groups(self.M_薬品)
         self.T_ロット = self._t_lot()
         self.T_判定理由 = self._reasons()
 
@@ -746,7 +826,10 @@ class Model:
         stock = hand["在庫情報"].copy() if len(hand["在庫情報"]) else pd.DataFrame(columns=["薬品名", "列数"])
         stock["薬品名"] = stock["薬品名"].map(nz); stock = stock.dropna(subset=["薬品名"]).drop_duplicates("薬品名")
         excl = set(hand["発注除外"]["薬品名"].map(nz).dropna()) if len(hand["発注除外"]) else set()
-        grp = hand["薬品グループ"].copy() if len(hand["薬品グループ"]) else pd.DataFrame(columns=["薬品名", "成分規格", "需要のまとまり", "先発後発"])
+        grp = hand["薬品グループ"].copy() if len(hand["薬品グループ"]) else pd.DataFrame(columns=["薬品名", "成分規格", "需要のまとまり", "先発後発", "供給状況", "切替先"])
+        for c in ("供給状況", "切替先"):
+            if c not in grp.columns:
+                grp[c] = None
         for c in grp.columns:
             grp[c] = grp[c].map(nz)
         grp = grp.dropna(subset=["薬品名"]).drop_duplicates("薬品名")
@@ -829,6 +912,18 @@ class Model:
         tr_map = dict(zip(trans["薬品名"], trans["経過措置期限"]))
         st_map = {r["薬品名"]: num(r.get("列数")) for _, r in stock.iterrows()}
         gr_map = {r["薬品名"]: r for _, r in grp.iterrows()}
+        # 切替（0.7.0）：切替元（この薬を切替先にしている薬）と、まとまりの直近1日平均払出
+        sw_from, sw_stock = {}, {}
+        for _, r0 in grp.iterrows():
+            if isinstance(r0["切替先"], str):
+                sw_from.setdefault(r0["切替先"], []).append(r0["薬品名"])
+        for k, lst in sw_from.items():
+            sw_stock[k] = float(sum((sui_rows.get(x, {}).get("最終在庫") or 0) for x in lst))
+        grp_rate = {}
+        for n0, r0 in gr_map.items():
+            g0 = r0["需要のまとまり"]
+            if isinstance(g0, str):
+                grp_rate[g0] = grp_rate.get(g0, 0.0) + float(sui_rows.get(n0, {}).get("直近の1日平均払出") or 0)
         ab_map = {r["薬品名"]: r for _, r in abbr.iterrows()}
         sl_map = {r["品名"]: r for _, r in sl.iterrows()}
         for n in names:
@@ -843,12 +938,19 @@ class Model:
                      システム最終払出日=(fudo[n]["最終払出日"] if n in fudo else None), システム在庫=(fudo[n]["数量"] if n in fudo else None),
                      薬価=(fudo[n]["薬価"] if n in fudo else None), YJコード=(fudo[n]["YJコード"] if n in fudo else None),
                      成分規格=(gr_map[n]["成分規格"] if n in gr_map else None), 需要のまとまり=(gr_map[n]["需要のまとまり"] if n in gr_map else None),
-                     先発後発=(gr_map[n]["先発後発"] if n in gr_map else None), 列数=cols_n,
+                     先発後発=(gr_map[n]["先発後発"] if n in gr_map else None), 供給状況=(gr_map[n]["供給状況"] if n in gr_map else None),
+                     切替先=(gr_map[n]["切替先"] if n in gr_map and isinstance(gr_map[n]["切替先"], str) else None),
+                     切替元=("、".join(sorted(sw_from[n])) if n in sw_from else None), 切替元の在庫=sw_stock.get(n),
+                     列数=cols_n,
                      出どころ=("予定・出納" if (p.get("予定日数", 0) or 0) > 0 and (m.get("動いた月数", 0) or 0) > 0
                                else "予定だけ" if (p.get("予定日数", 0) or 0) > 0 else "出納だけ"))
             key = (gr_map[n]["需要のまとまり"] if n in gr_map and isinstance(gr_map[n]["需要のまとまり"], str) else None) or n
             ab = abc_map.get(key)
-            r["区分"] = ab["区分"] if ab is not None else None
+            r["区分"] = "D" if r["切替先"] else (ab["区分"] if ab is not None else None)        # 切替元は D
+            own_rate = float(m.get("直近の1日平均払出") or 0)
+            r["まとまりの直近1日平均払出"] = grp_rate.get(key, own_rate) if key != n else own_rate
+            st0 = float(m.get("最終在庫") or 0)
+            r["切替の使い切り日数"] = (st0 / r["まとまりの直近1日平均払出"]) if (r["切替先"] and r["まとまりの直近1日平均払出"] > 0) else None
             r["量の区分"] = ab["量の区分"] if ab is not None else None
             r["患者の最少月"] = (None if ab is None or pd.isna(ab["患者の最少月"]) else float(ab["患者の最少月"]))
             for c in plan_cols:
@@ -920,7 +1022,9 @@ class Model:
             dmap = {"安定": "D01", "ばらつき大": "D02", "間欠": "D03", "まばら・大口": "D04"}
             if typ in dmap: hits.append((dmap[typ], adi, None))
             if (g("予定外の月数") or 0) >= 1: hits.append(("D05", g("予定外の月数"), 1))
-            if g("区分") == "D" and r["出どころ"] != "出納だけ": hits.append(("D06", g("患者の最少月"), d_line))
+            if g("区分") == "D" and r["出どころ"] != "出納だけ" and not g("切替先"): hits.append(("D06", g("患者の最少月"), d_line))
+            if g("切替先"): hits.append(("E05", g("切替の使い切り日数"), None))
+            if g("切替元"): hits.append(("E06", g("切替元の在庫"), None))
             if gr is not None and gr >= gap_r: hits.append(("P01", gr * 100, gap_r * 100))
             if gr is not None and gr <= -gap_r: hits.append(("P02", -gr * 100, gap_r * 100))
             if gs is not None and gs >= gap_s: hits.append(("P03", gs * 100, gap_s * 100))

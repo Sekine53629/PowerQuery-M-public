@@ -7,7 +7,9 @@
 //        同じまとまりの別の屋号が動いていて、直近の在庫日数 ≧ 転送候補の在庫日数 → 他店へ転送／
 //        在庫日数 ≧ 転送候補の在庫日数 → 他店へ転送か返品／それ以外 → 様子見（発注を止める）
 //    ※ 処置の案は目安。最終判断は現場
-//    ・種類：不動／在庫過多（0.6.1 で「区分」から改名。区分 は M_薬品 の A／B／C／D）
+//    ・種類：不動／切替中／在庫過多（0.6.1 で「区分」から改名。区分 は M_薬品 の A／B／C／D）
+//    ・切替中（0.7.0）：薬品グループの 切替先 が入っている薬。不動とはせず、切替先の需要で使い切る見込み日数を出す。
+//      返品できる分は返品し、できない分を使い切る
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -28,24 +30,30 @@ let
     Cand   = Table.SelectRows(Drugs, each (([最終在庫] ?? 0) > 0 or ([システム在庫] ?? 0) > 0) and (
                  ([動きのない月数] <> null and [動きのない月数] >= Still) or [不動品リスト] = true
                  or ([直近の在庫日数] <> null and [直近の在庫日数] >= Over)
-                 or ([直近の払出合計] ?? 0) = 0)),
+                 or ([直近の払出合計] ?? 0) = 0
+                 or [切替先] <> null)),
     J      = Table.ExpandTableColumn(
                  Table.NestedJoin(Cand, {"需要のまとまり"}, Alive, {"需要のまとまり"}, "a", JoinKind.LeftOuter), "a", {"動いている屋号"}),
     Calc   = Table.AddColumn(J, "計算", each
         let
-            dead    = ([動きのない月数] <> null and [動きのない月数] >= Still) or [不動品リスト] = true,
+            sw      = [切替先] <> null,
+            dead    = not sw and (([動きのない月数] <> null and [動きのない月数] >= Still) or [不動品リスト] = true),
             perDay  = [直近の1日平均払出] ?? 0,
             stock   = [最終在庫] ?? [システム在庫] ?? 0,
             surplus = List.Max({0, stock - perDay * Horizon}),
             others  = List.Select([動いている屋号] ?? {}, (n) => n <> [薬品名]),
             rdays   = [直近の在庫日数],
-            act     = if dead then "返品（できなければ廃棄か他店へ転送）"
+            useUp   = [切替の使い切り日数],
+            act     = if sw then "切替先「" & [切替先] & "」の需要で使い切る"
+                                & (if useUp = null then "（切替先の払出なし）" else "（見込み " & Text.From(Number.RoundUp(useUp)) & "日）")
+                                & "。返品できる分は返品"
+                      else if dead then "返品（できなければ廃棄か他店へ転送）"
                       else if not List.IsEmpty(others) and (rdays = null or rdays >= TransferD) then
                           "他店へ転送（同じ成分は " & others{0} & " が動いている）"
                       else if rdays <> null and rdays >= TransferD then "他店へ転送か返品"
                       else "様子見（発注を止める）"
         in
-            [種類 = if dead then "不動" else "在庫過多", 並び = if dead then 0 else 1,
+            [種類 = if sw then "切替中" else if dead then "不動" else "在庫過多", 並び = if dead then 0 else if sw then 1 else 2,
              余った量 = surplus, 処置の案 = act]),
     E      = Table.ExpandRecordColumn(Calc, "計算", {"種類", "並び", "余った量", "処置の案"}),
     Out    = Table.SelectColumns(E, {"種類", "薬品名", "略称", "区分", "棚番", "需要のまとまり", "最終在庫", "最後に動いた月", "動きのない月数",

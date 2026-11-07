@@ -188,8 +188,9 @@ def r5_order(model, settings):
         mq = math.ceil(round((mx[n][0] if n in mx else 0.0) * factor, 6))
         cls, sup = g("区分"), g("供給状況")
         excl = bool(r["発注除外"]); trans = bool(r["経過措置"])
-        no_order = excl or sup in ("供給停止", "薬価削除予定")
-        careful = cls == "D" or trans or sup == "限定" or gap <= -gap_r
+        sw_to, sw_from = g("切替先"), g("切替元")
+        no_order = excl or sup in ("供給停止", "薬価削除予定") or bool(sw_to)
+        careful = cls == "D" or trans or sup == "限定" or gap <= -gap_r or bool(sw_from)
         oq = 0 if no_order else math.ceil(round(max(0.0, exp - stock), 6))
         over = cls == "A" and mq > 0 and stock + oq > mq
         notes = []
@@ -202,6 +203,8 @@ def r5_order(model, settings):
         if cls == "D": notes.append("患者が少ない（区分 D）")
         if trans: notes.append("経過措置品（切替先があれば発注しない）")
         if r["出どころ"] == "出納だけ": notes.append("予定にない薬")
+        if sw_to: notes.append(f"切替元（「{sw_to}」へ寄せる。在庫を使い切る）")
+        if sw_from: notes.append(f"切替先（切替元の在庫 {fmt0(g('切替元の在庫'))} を使い切るまで控えめに）")
         if over: notes.append(f"上限を超える（在庫＋目安 {fmt0(stock + oq)} ＞ {fmt0(mq)}）")
         note = "、".join(notes)
         verdict = "発注しない" if no_order else "控えめに" if (oq > 0 and careful) else "発注する" if oq > 0 else "不要"
@@ -436,6 +439,7 @@ def main():
     K = dict(K0=k0_summary(model, settings, abc_m), K1=k1_stock_bins(model), K2=k2_quadrant(model, settings), K4=k4_loss(model), K6=k6_share(model))
     sheets = [("T_日次", model.T_日次), ("T_月次", model.T_月次), ("M_日付", model.M_日付), ("M_薬品", model.M_薬品),
               ("M_理由コード", model.M_理由コード), ("T_判定理由", model.T_判定理由), ("T_ロット", model.T_ロット), ("T_ABC月次", abc_m),
+              ("薬品グループ案", model.薬品グループ案),
               ("R1_ABC区分表", R["R1"]), ("R2_不動薬の処理候補", R["R2"]), ("R3_経過措置・期限切迫", R["R3"]), ("R4_出荷調整の可能性", R["R4"]), ("R5_発注書", R["R5"]),
               ("K0_月次サマリー", K["K0"]), ("K1_在庫日数の分布", K["K1"]), ("K2_4象限_薬品数", K["K2"][0]), ("K2_4象限_在庫", K["K2"][1]),
               ("K4_ロス_月別", K["K4"][0]), ("K4_ロス_薬品別", K["K4"][1]), ("K6_屋号の構成比", K["K6"]), ("出納", model.出納)]

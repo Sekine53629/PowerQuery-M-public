@@ -36,6 +36,11 @@
 //      不動品リスト   ：㉑ 不動品リスト に載っている薬（出納の期間より前から動いていない薬もここで拾う）
 //      システム不動日数／システム最終払出日／システム在庫／薬価／YJコード：㉑ を薬ごとにまとめたもの
 //      供給状況       ：薬品グループの列（通常／限定／供給停止／経過措置／薬価削除予定。手入力）
+//    【切替】薬品グループの「切替先」（0.7.0）
+//      切替先         ：この薬（旧品）の需要を引き継ぐ薬。入っている薬は 区分 D（これからの需要は切替先へ）
+//      切替元         ：この薬を切替先に指定している薬（複数なら「、」でつなぐ）。切替元の在庫 ＝ その在庫の合計
+//      まとまりの直近1日平均払出：同じ需要のまとまりの屋号すべての直近の1日平均払出の合計（未登録なら自分の値）
+//      切替の使い切り日数：旧品の在庫 ÷ まとまりの直近1日平均払出（切替先の需要で使い切る見込み）
 //      まとまり内で最多：同じ「需要のまとまり」（屋号が2つ以上）の中で、直近の払出が一番多い薬（E04 に使う）
 // ================================================================================
 let
@@ -91,10 +96,10 @@ let
                 {"薬品名", Clean, type nullable text},
                 {"列数", each try Number.From(_) otherwise null, type nullable number}}), {"薬品名"}),
     Excl  = List.Buffer(List.RemoveNulls(List.Transform(Hand("発注除外", {"薬品名"})[薬品名], Clean))),
-    Grp   = Table.Distinct(Table.TransformColumns(Hand("薬品グループ", {"薬品名", "成分規格", "需要のまとまり", "先発後発", "供給状況"}), {
+    Grp   = Table.Distinct(Table.TransformColumns(Hand("薬品グループ", {"薬品名", "成分規格", "需要のまとまり", "先発後発", "供給状況", "切替先"}), {
                 {"薬品名", Clean, type nullable text}, {"成分規格", Clean, type nullable text},
                 {"需要のまとまり", Clean, type nullable text}, {"先発後発", Clean, type nullable text},
-                {"供給状況", Clean, type nullable text}}), {"薬品名"}),
+                {"供給状況", Clean, type nullable text}, {"切替先", Clean, type nullable text}}), {"薬品名"}),
 
     // ---- 予定の指標 ----
     DayN  = List.Count(List.Distinct(Day[日付])),
@@ -191,7 +196,7 @@ let
              {"経過措置期限"}),
     J4 = Table.ExpandTableColumn(Table.NestedJoin(J3, {"薬品名"}, Stock, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"列数"}),
     J5 = Table.ExpandTableColumn(Table.NestedJoin(J4, {"薬品名"}, Grp, {"薬品名"}, "x", JoinKind.LeftOuter), "x",
-             {"成分規格", "需要のまとまり", "先発後発", "供給状況"}),
+             {"成分規格", "需要のまとまり", "先発後発", "供給状況", "切替先"}),
     J6 = Table.ExpandTableColumn(Table.NestedJoin(J5, {"薬品名"}, DayG, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"m"}, {"予定"}),
     J7 = Table.ExpandTableColumn(Table.NestedJoin(J6, {"薬品名"}, MonG, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"m"}, {"出納"}),
 
@@ -213,7 +218,17 @@ let
 
     J8 = Table.ExpandTableColumn(Table.NestedJoin(E2, {"薬品名"}, Fudo, {"薬品名"}, "x", JoinKind.LeftOuter), "x",
              {"システム最終払出日", "システム不動日数", "システム在庫", "薬価", "YJコード"}),
-    K1 = Table.AddColumn(J8, "まとまりキー", each [需要のまとまり] ?? [薬品名], type text),
+    // 切替：切替元（この薬を切替先にしている薬）と、まとまりの直近1日平均払出
+    SwSrc = Table.SelectRows(E2, each [切替先] <> null),
+    SwG   = Table.Group(SwSrc, {"切替先"}, {
+                {"切替元", each Text.Combine(List.Sort([薬品名]), "、"), type text},
+                {"切替元の在庫", each List.Sum(List.Transform([最終在庫], (v) => v ?? 0)), type number}}),
+    J8s = Table.ExpandTableColumn(Table.NestedJoin(J8, {"薬品名"}, SwG, {"切替先"}, "x", JoinKind.LeftOuter), "x", {"切替元", "切替元の在庫"}),
+    GrpRate = Table.Group(Table.SelectRows(E2, each [需要のまとまり] <> null), {"需要のまとまり"}, {
+                {"まとまりの直近1日平均払出", each List.Sum(List.Transform([#"直近の1日平均払出"], (v) => v ?? 0)), type number}}),
+    J8r = Table.ExpandTableColumn(Table.NestedJoin(J8s, {"需要のまとまり"}, GrpRate, {"需要のまとまり"}, "x", JoinKind.LeftOuter), "x",
+              {"まとまりの直近1日平均払出"}),
+    K1 = Table.AddColumn(J8r, "まとまりキー", each [需要のまとまり] ?? [薬品名], type text),
     J9 = Table.RemoveColumns(
              Table.ExpandTableColumn(Table.NestedJoin(K1, {"まとまりキー"}, AbcLatest, {"需要のまとまり"}, "x", JoinKind.LeftOuter), "x",
                  {"区分", "量の区分", "患者の最少月"}), {"まとまりキー"}),
@@ -224,6 +239,12 @@ let
 
     Fin = Table.AddColumn(E3, "f", each
             [製剤_表示 = [製剤] ?? [製剤_予定],
+             // 切替元（切替先が入っている薬）は区分 D。まとまりの払出が未登録なら自分の値
+             区分_切替 = if [切替先] <> null then "D" else [区分],
+             まとまり払出 = [まとまりの直近1日平均払出] ?? [#"直近の1日平均払出"] ?? 0,
+             切替の使い切り日数 = if [切替先] = null then null
+                                   else let r = [まとまりの直近1日平均払出] ?? [#"直近の1日平均払出"] ?? 0, s = [最終在庫] ?? 0
+                                        in if r > 0 then s / r else null,
              経過措置 = List.Contains(Trans[薬品名], [薬品名]),
              発注除外 = List.Contains(Excl, [薬品名]),
              // 動いた月数は、予定だけの薬でも 0 で入るので「> 0」で見る
@@ -231,20 +252,24 @@ let
                         else if ([予定日数] ?? 0) > 0 then "予定だけ" else "出納だけ",
              まとまり内で最多 = List.Contains(TopNames, [薬品名]),
              不動品リスト = List.Contains(FudoNames, [薬品名])]),
-    F2 = Table.ExpandRecordColumn(Fin, "f", {"製剤_表示", "経過措置", "発注除外", "出どころ", "まとまり内で最多", "不動品リスト"}),
+    F2 = Table.ExpandRecordColumn(Table.RemoveColumns(Fin, {"区分", "まとまりの直近1日平均払出"}), "f",
+             {"製剤_表示", "区分_切替", "まとまり払出", "切替の使い切り日数", "経過措置", "発注除外", "出どころ", "まとまり内で最多", "不動品リスト"}),
 
     Out = Table.SelectColumns(F2, {
               "薬品名", "略称", "製剤_表示", "単位", "棚番", "コード", "品名の先頭空白",
               "経過措置", "経過措置期限", "発注除外", "成分規格", "需要のまとまり", "先発後発",
-              "列数", "出どころ", "供給状況", "区分", "量の区分", "患者の最少月"} & PlanCols & PatCols & SuiCols & {"まとまり内で最多",
+              "列数", "出どころ", "供給状況", "区分_切替", "量の区分", "患者の最少月", "切替先", "切替元", "切替元の在庫",
+              "まとまり払出", "切替の使い切り日数"} & PlanCols & PatCols & SuiCols & {"まとまり内で最多",
               "不動品リスト", "システム不動日数", "システム最終払出日", "システム在庫", "薬価", "YJコード"}),
-    Ren = Table.RenameColumns(Out, {{"製剤_表示", "製剤"}}),
+    Ren = Table.RenameColumns(Out, {{"製剤_表示", "製剤"}, {"区分_切替", "区分"}, {"まとまり払出", "まとまりの直近1日平均払出"}}),
     Typed = Table.TransformColumnTypes(Ren, {
               {"略称", type text}, {"製剤", type text}, {"単位", type text}, {"棚番", type text}, {"コード", type text},
               {"品名の先頭空白", Int64.Type}, {"経過措置", type logical}, {"経過措置期限", type date},
               {"発注除外", type logical}, {"成分規格", type text}, {"需要のまとまり", type text}, {"先発後発", type text},
               {"列数", type number}, {"出どころ", type text},
               {"区分", type text}, {"量の区分", type text}, {"患者の最少月", type number},
+              {"切替先", type text}, {"切替元", type text}, {"切替元の在庫", type number},
+              {"まとまりの直近1日平均払出", type number}, {"切替の使い切り日数", type number},
               {"直近の月平均患者数", type number}, {"稼働四半期数", Int64.Type},
               {"予定日数", Int64.Type}, {"予定数量合計", type number}, {"予定患者数合計", type number},
               {"最終予定日", type date}, {"平均間隔", type number}, {"ばらつき（CV²）", type number},

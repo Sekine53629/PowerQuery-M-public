@@ -32,6 +32,14 @@ TH = dict(不動とみなす月数=3, 在庫過多とみなす日数=60, ずれ�
 RECENT_N = 3                                              # 設定「直近の月数」の初期値（直近の払出・在庫日数・S05）
 ABC_N = 3                                                 # 設定「ABCの月数」の初期値（区分の窓）
 FC_DAYS = 7                                               # 設定「予測日数」の初期値（発注書 F の来週）
+# 薬品グループ（手入力）：旧名称 → 新名称の切替の例（0.7.0）。アリピプラゾール錠3mg は予定では「（旧）」付き、出納では新しい名前
+#   まとまり＝「アリピプラゾール 3mg」。（旧）が切替元、新しい名前が切替先。手入力テーブルの名前は正規化後の表記（半角のかっこ）
+GROUP_ROWS = [  # 薬品名, 成分規格, 需要のまとまり, 先発後発, 供給状況, 切替先
+    ("アリピプラゾール錠3mg(旧)", "アリピプラゾール錠3mg", "アリピプラゾール 3mg", "後発", None, "アリピプラゾール錠3mg"),
+    ("アリピプラゾール錠3mg", "アリピプラゾール錠3mg", "アリピプラゾール 3mg", "後発", None, None),
+]
+GROUP_OF = {r[0]: r[2] for r in GROUP_ROWS}             # 薬品名（正規化後） → 需要のまとまり
+SWITCH_TO = {r[0]: r[5] for r in GROUP_ROWS if r[5]}    # 切替元 → 切替先
 # 卸の休み（④ と同じ：土日・祝日・年末年始）。2026 年 4～10 月の祝日を固定で列挙（振替休日・国民の休日を含む）
 HOLIDAYS_2026 = {dt.date(2026, 4, 29), dt.date(2026, 5, 3), dt.date(2026, 5, 4), dt.date(2026, 5, 5), dt.date(2026, 5, 6),
                  dt.date(2026, 7, 20), dt.date(2026, 8, 11), dt.date(2026, 9, 21), dt.date(2026, 9, 22), dt.date(2026, 9, 23),
@@ -309,7 +317,9 @@ def write_hand_tables(H, S):
     wb.create_sheet("発注除外").append(["薬品名", "理由", "登録日"])
     wb.create_sheet("在庫情報").append(["薬品名", "列数", "使用期限"])
     wb.create_sheet("追加休業日").append(["日付", "理由"])
-    wb.create_sheet("薬品グループ").append(["薬品名", "成分規格", "需要のまとまり", "先発後発", "供給状況"])
+    ws = wb.create_sheet("薬品グループ"); ws.append(["薬品名", "成分規格", "需要のまとまり", "先発後発", "供給状況", "切替先"])
+    for row in GROUP_ROWS:
+        ws.append(list(row))
     for w in wb:
         for c in w[1]:
             c.font = Font(bold=True)
@@ -423,23 +433,30 @@ def expected(days, plan, mon, info, plan_name, fudo, fc):
         for m in months:
             o, moved = out_of(nme, m)
             exists[(m, nme)] = moved or plan_m.get((m, nme), 0) > 0
+    key_of = lambda n2: GROUP_OF.get(n2, n2)             # まとまり（薬品グループにあればそれ、なければ薬品名）
+    members = defaultdict(list)
+    for n2 in names:
+        members[key_of(n2)].append(n2)
     abc_rows, prev_cls = [], {}
     for i, m in enumerate(months):
         win = months[max(0, i + 1 - ABC_N):i + 1]
-        seen = sorted({n2 for (mm, n2), ok in exists.items() if ok and mm <= m})
-        vals = {n2: sum(out_of(n2, w)[0] for w in win) for n2 in seen}
+        seen = sorted({key_of(n2) for (mm, n2), ok in exists.items() if ok and mm <= m})
+        vals = {k: sum(out_of(n2, w)[0] for n2 in members[k] for w in win) for k in seen}
         total = sum(vals.values()); cum = 0.0; cur = {}
-        for n2, v in sorted(vals.items(), key=lambda kv: (-kv[1], kv[0])):
+        for k, v in sorted(vals.items(), key=lambda kv: (-kv[1], kv[0])):
             share = v / total if total else 0.0; cum += share
             avg = v / len(win)
             q = "A" if avg >= TH["区分Aの線"] else "B" if avg >= TH["区分Bの線"] else "C"
-            pmin = min(pat_m.get((w, n2), 0.0) for w in win)
+            pmin = min(sum(pat_m.get((w, n2), 0.0) for n2 in members[k]) for w in win)
             cls = "D" if pmin < TH["区分Dの患者数"] else q
-            abc_rows.append(dict(月=m, 需要のまとまり=n2, 払出=v, 構成比=share, 累積=(cum if total else 0.0), 月平均払出=avg,
-                                 量の区分=q, 患者の最少月=pmin, 区分=cls, 前月の区分=prev_cls.get(n2)))
-            cur[n2] = cls
+            abc_rows.append(dict(月=m, 需要のまとまり=k, 払出=v, 構成比=share, 累積=(cum if total else 0.0), 月平均払出=avg,
+                                 量の区分=q, 患者の最少月=pmin, 区分=cls, 前月の区分=prev_cls.get(k)))
+            cur[k] = cls
         prev_cls = cur
     abc_latest = {r["需要のまとまり"]: r for r in abc_rows if r["月"] == months[-1]}
+    sw_from = defaultdict(list)                          # 切替先 → [切替元]
+    for a, b in SWITCH_TO.items():
+        sw_from[b].append(a)
 
     # ---- 発注書 F の材料 ----
     #   来週：発注日の翌日から FC_DAYS 日。在庫は一番新しい日の 在庫数量（発注残込み）
@@ -499,8 +516,10 @@ def expected(days, plan, mon, info, plan_name, fudo, fc):
         less = sum(-x["その他の増減"] for x in rows if x["その他の増減"] < 0)
         src = "予定・出納" if n and moved else "予定だけ" if n else "出納だけ"
         trans = ALL_TRANS.get(raw.get(name, name))
-        ab = abc_latest.get(name)
-        d = dict(薬品名=name, 出どころ=src, 区分=(ab["区分"] if ab else None), 量の区分=(ab["量の区分"] if ab else None),
+        ab = abc_latest.get(key_of(name))
+        sw_to = SWITCH_TO.get(name)
+        cls_d = "D" if sw_to else (ab["区分"] if ab else None)     # 切替元は D
+        d = dict(薬品名=name, 出どころ=src, 区分=cls_d, 量の区分=(ab["量の区分"] if ab else None),
                  患者の最少月=(ab["患者の最少月"] if ab else None),
                  予定日数=(n if n else None), 平均間隔=adi, CV2=cv2, 需要の型=typ,
                  動いた月数=len(moved) if has_rows else None,
@@ -520,7 +539,9 @@ def expected(days, plan, mon, info, plan_name, fudo, fc):
         if raw.get(name, name) in fudo: codes.append("S06")
         codes += {"安定": ["D01"], "ばらつき大": ["D02"], "間欠": ["D03"], "まばら・大口": ["D04"]}.get(typ, [])
         if extra_m >= 1: codes.append("D05")
-        if ab and ab["区分"] == "D" and src != "出納だけ": codes.append("D06")
+        if cls_d == "D" and src != "出納だけ" and not sw_to: codes.append("D06")
+        if sw_to: codes.append("E05")
+        if name in sw_from: codes.append("E06")
         # ---- 発注書 F（㉔）：注意のうち、ロット・出荷調整によるものは期待値では見ない（行の有無もそれに依存する分は Excel 側だけ）----
         fcd = fc_by.get(name, {})
         plan7 = sum(v[0] for v in fcd.values()); pats7 = sum(v[1] for v in fcd.values())
@@ -531,12 +552,12 @@ def expected(days, plan, mon, info, plan_name, fudo, fc):
         for dd, (q, p) in tday.get(name, {}).items():
             blocks[next_biz(dd)] += q
         max_q = math.ceil(round(max(blocks.values(), default=0) * factor, 6))
-        cls = ab["区分"] if ab else None
-        no_order = False                                 # 発注除外・供給停止はテストデータにない
-        careful = cls == "D" or trans is not None or gap_v <= -TH["ずれの注意割合"]
-        oq = math.ceil(round(max(0, plan7 * factor - stock_f), 6))
+        cls = cls_d
+        no_order = bool(sw_to)                           # 発注除外・供給停止はテストデータにない。切替元は発注しない
+        careful = cls == "D" or trans is not None or gap_v <= -TH["ずれの注意割合"] or name in sw_from
+        oq = 0 if no_order else math.ceil(round(max(0, plan7 * factor - stock_f), 6))
         over = cls == "A" and max_q > 0 and stock_f + oq > max_q
-        note_det = (gap_v <= -TH["ずれの注意割合"]) or cls == "D" or trans is not None or src == "出納だけ" or over
+        note_det = (gap_v <= -TH["ずれの注意割合"]) or cls == "D" or trans is not None or src == "出納だけ" or over or sw_to or (name in sw_from)
         verdict = "発注しない" if no_order else "控えめに" if (oq > 0 and careful) else "発注する" if oq > 0 else "不要"
         if plan7 > 0 or max(0, plan7 - stock_f) > 0 or note_det or cls == "A":
             orders.append(dict(薬品名=name, 区分=cls, 来週の予定=plan7, 来週の患者=pats7, 在庫=stock_f, 不足=max(0, plan7 - stock_f),
@@ -560,7 +581,7 @@ def expected(days, plan, mon, info, plan_name, fudo, fc):
     for t in ["M の定義どおりに Python で計算した期待値。Excel の結果と突き合わせる",
               "・T_月次：その月に出納に載ったか予定があった薬の行だけ（動きも予定もない月は行なし。⑦ と同じ）",
               "・M_薬品：列名の「一日」「CV2」は、Excel では「1日」「ばらつき（CV²）」",
-              "・T_ABC月次：まとまり＝薬品名（薬品グループが空）。量の区分は月平均払出の線 1000／300、区分 D は窓の各月の予定患者数の最少が 2 未満",
+              "・T_ABC月次：まとまり＝薬品名。ただしアリピプラゾール錠3mg(旧)（予定）と アリピプラゾール錠3mg（出納）は薬品グループで同じまとまり「アリピプラゾール 3mg」（(旧) が切替元）。量の区分は月平均払出の線 1000／300、区分 D は窓の各月の予定患者数の最少が 2 未満",
               "・R_発注書：来週＝10/2～10/8 の予測（202610 のファイル）。期待値にある行だけ比べる（ロット・出荷調整の注意だけで載る行は Excel 側だけ）",
               "・祝日は無視して月～土を営業日にしている（テストデータの作り方の都合）",
               "・アリピプラゾールは実績の名前を「（旧）」付きにして、出納とずらしてある（Q01・Q02 の確認用）",

@@ -11,7 +11,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Book,
     [string]$Out,
-    [string[]]$Queries = @("M_薬品", "T_月次", "T_判定理由", "T_ABC月次"),
+    [string[]]$Queries = @("M_薬品", "T_月次", "T_判定理由", "T_ABC月次", "R_発注点見直し", "R_不動在庫", "R_経過措置", "R_出荷調整管理票", "R_極小需要", "R_発注書", "読込の確認", "薬品グループ案"),   # 0.7.0：既定で A～F・読込の確認・薬品グループ案 も書き出す（B～E の失敗を見逃さないため）
     [switch]$Touch        # 読み込む前にクエリ 1 本を同じ内容で書き直す（同じセッションで書き換えた直後だけ Formula.Firewall が出ない現象への回避。保存しないので中身は変わらない）
 )
 $ErrorActionPreference = "Stop"

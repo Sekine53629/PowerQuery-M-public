@@ -1,6 +1,16 @@
 ================================================================================
  在庫分析 PowerPivot_ABC：在庫の必要性を判断するためのデータ（データモデル）と判定理由
- 版：0.6.1（F 発注書：来週の予定と在庫から発注の目安・判定・注意を出す。必要な最大在庫）
+ 版：0.7.0（薬品グループ案：品目名から需要のまとまりを提案。経過措置の切替先）
+   0.7.0 での変更：
+     ・㉕ 薬品グループ案 を追加（シート「薬品グループ案」）。薬品名を「成分＋剤形＋規格「屋号」」に分解し、手入力テーブル
+       薬品グループ に入れる 成分規格・需要のまとまり（成分＋規格。錠・OD錠・カプセルは同じ）・先発後発 の案を出す。
+       屋号のない名前（先発・旧名称）、漢方・OTC・変則の剤形は「要確認」。案は確認してから貼る（機械判定は区分に使わない）
+     ・薬品グループに「切替先」の列を追加。経過措置などで旧品→新品に切り替えるとき、旧品の行に新品の薬品名を書く。
+         旧品（切替元）：区分 D、B 表は「切替中」（切替先の需要で使い切る見込み日数）、C 表の払出はまとまりの値、
+                         F 表は「発注しない（切替先へ寄せる）」、理由コード E05
+         新品（切替先）：A 表の代表の薬に優先、F 表は「控えめに（切替元の在庫を使い切るまで）」、理由コード E06
+       M_薬品 に 切替先・切替元・切替元の在庫・まとまりの直近1日平均払出・切替の使い切り日数 を追加
+     ・※ 確認の状況は末尾の「■ 注意」を参照
    0.6.1 での変更：
      ・【修正】⑯ R_不動在庫（B 表）が「フィールド '区分' は既にレコードに存在します」のエラーで読み込めなかった。
        B 表の「区分」（不動／在庫過多）が、0.5.0 で M_薬品 に加えた 区分（A／B／C／D）と同じ名前だったため。
@@ -81,7 +91,7 @@
      経過措置リストのテーブルから直接読む。略称は実績からだけ取る
    まだの変更：最終の判定（J1～J4：持つ／最小在庫だけ持つ／持たない／移動・返品の候補）、
      需要のまとまりの期間による切り替え（出荷調整）、ピボットレポート
- 作成：関根禎浩　2026-11-02（0.6.1：2026-11-08）
+ 作成：関根禎浩　2026-11-02（0.7.0：2026-11-08）
 ================================================================================
 
 ■ このブックでできること（月1回）
@@ -179,11 +189,13 @@
  3. 発注除外（任意）：列「薬品名」「理由」「登録日」（不動確定・マスタ削除の薬）
  4. 在庫情報（任意）：列「薬品名」「列数」「使用期限」（列数は棚の区画の列数。使用期限はロットのない薬の期限を手で入れるとき）
  5. 追加休業日（任意）：列「日付」「理由」（卸が休む日。M_日付 の卸の営業日に使う）
- 6. 薬品グループ（任意）：列「薬品名」「成分規格」「需要のまとまり」「先発後発」「供給状況」
+ 6. 薬品グループ（任意）：列「薬品名」「成分規格」「需要のまとまり」「先発後発」「供給状況」「切替先」
       ・成分規格      ：成分と規格（例：タンドスピロン 10mg）。屋号・先発後発をまとめて見るとき
       ・需要のまとまり：入れ替えて使える薬の組。先発に固定の需要は先発だけの組にする
       ・先発後発      ：先発／後発 など
       ・供給状況      ：通常／限定／供給停止／経過措置／薬価削除予定（任意。「通常」以外は推奨・次点の順位を後ろに回す）
+      ・切替先        ：旧品→新品の切替のとき、旧品の行に新品の薬品名（任意。0.7.0）
+      ※ シート「薬品グループ案」に、薬品名から分解した案が出る。確認して貼ると早い
  ※ 2～6 は発注支援のブックと同じ内容でよい（コピーして貼る）
  ※ 手入力テーブルの薬品名は、M_薬品 に出る薬品名（正規化後）と同じ表記で書く
 
@@ -196,7 +208,7 @@
  [データ]→[データの取得]→[その他のデータソースから]→[空のクエリ]
  → [ホーム]→[詳細エディター] に下のコードを貼り付け → [完了]
  → 右側「クエリの設定」の名前を見出しのとおりに変更
- を、下の順に24回繰り返す（⓪ の次に ㉒ を作る。⑨⑭⑯ は ⑳㉑ を参照するので、全部貼り終えてから更新する）
+ を、下の順に26回繰り返す（⓪ の次に ㉒ を作る。⑨⑭⑯ は ⑳㉑ を参照するので、全部貼り終えてから更新する）
  ※ ⓪②④㉒は関数。貼り付けると値の入力画面が出るが、そのままでよい（[呼び出す]は押さない）
  ※ 0.3.0 から上げるとき：①②⑤⑭⑳㉑ を貼り替え、㉒㉓ を新しく作る（ほかのクエリは同じ）
 
@@ -226,6 +238,7 @@
    ㉑  不動品リスト          不動品リスト（エリシアS）を読む        接続のみ
    ㉓  読込の確認            ファイルが読めるか・読めない理由      シート「読込の確認」（表）
    ㉔  R_発注書              F 来週の発注の目安・判定・注意        シート「F_発注書」（表）
+   ㉕  薬品グループ案        薬品名から需要のまとまりの案を出す    シート「薬品グループ案」（表）
 
  読み込み先の設定：エディターで[閉じて読み込む]の▼→[閉じて次に読み込む]→「接続の作成のみ」。
  「データモデル」のクエリは、さらに「このデータをデータモデルに追加する」にチェックを入れる
@@ -269,6 +282,9 @@
   ・クエリを貼り替えたあとは、[クエリのオプション]→[現在のブック]→[プライバシー]→「無視」を選び直して保存する
     （「…他のクエリまたはステップを参照しているため、データ ソースに直接アクセスできません」の Formula.Firewall のエラーが出たらこれ）
   ・更新には数分かかる（読み込む表ごとに ③ 日次データ が評価し直されるため。架空データでも［すべて更新］に 3～4 分）
+  ・0.7.0 の確認の状況（2026-11-08）：架空データ（薬品グループに切替の 2 行）を .xlsx と .xls で Excel から書き出し、A～F・読込の確認・
+    薬品グループ案・データモデルの表が期待値と一致（違い 0。T_ABC月次 72 行、T_判定理由 50 件に E05・E06）。薬品グループ案 14 行、
+    体裁（要確認・違い・屋号数）も確認。.csv／.txt は読込に変更がないので 0.6.1 の確認のまま。店の実データ（実際の薬品名）では未確認
   ・0.6.1 の確認の状況（2026-11-08）：B 表の修正後、A～F の 6 つの表と読込の確認・データモデルの表を .xlsx と .xls で書き出し、
     B 表 6 行（種類・区分の列を含む）と期待値の一致（違い 0）を確認。B 表と F 表は .csv／.txt でも同じ結果。店の実データでは未確認
   ・0.6.0 の確認の状況（2026-11-08）：架空データ（6 か月・14 品目、10/2～10/15 の予測つき）の .xlsx／.xls／.csv／.txt の 4 形式で、
@@ -1249,6 +1265,11 @@ in
 //      不動品リスト   ：㉑ 不動品リスト に載っている薬（出納の期間より前から動いていない薬もここで拾う）
 //      システム不動日数／システム最終払出日／システム在庫／薬価／YJコード：㉑ を薬ごとにまとめたもの
 //      供給状況       ：薬品グループの列（通常／限定／供給停止／経過措置／薬価削除予定。手入力）
+//    【切替】薬品グループの「切替先」（0.7.0）
+//      切替先         ：この薬（旧品）の需要を引き継ぐ薬。入っている薬は 区分 D（これからの需要は切替先へ）
+//      切替元         ：この薬を切替先に指定している薬（複数なら「、」でつなぐ）。切替元の在庫 ＝ その在庫の合計
+//      まとまりの直近1日平均払出：同じ需要のまとまりの屋号すべての直近の1日平均払出の合計（未登録なら自分の値）
+//      切替の使い切り日数：旧品の在庫 ÷ まとまりの直近1日平均払出（切替先の需要で使い切る見込み）
 //      まとまり内で最多：同じ「需要のまとまり」（屋号が2つ以上）の中で、直近の払出が一番多い薬（E04 に使う）
 // ================================================================================
 let
@@ -1304,10 +1325,10 @@ let
                 {"薬品名", Clean, type nullable text},
                 {"列数", each try Number.From(_) otherwise null, type nullable number}}), {"薬品名"}),
     Excl  = List.Buffer(List.RemoveNulls(List.Transform(Hand("発注除外", {"薬品名"})[薬品名], Clean))),
-    Grp   = Table.Distinct(Table.TransformColumns(Hand("薬品グループ", {"薬品名", "成分規格", "需要のまとまり", "先発後発", "供給状況"}), {
+    Grp   = Table.Distinct(Table.TransformColumns(Hand("薬品グループ", {"薬品名", "成分規格", "需要のまとまり", "先発後発", "供給状況", "切替先"}), {
                 {"薬品名", Clean, type nullable text}, {"成分規格", Clean, type nullable text},
                 {"需要のまとまり", Clean, type nullable text}, {"先発後発", Clean, type nullable text},
-                {"供給状況", Clean, type nullable text}}), {"薬品名"}),
+                {"供給状況", Clean, type nullable text}, {"切替先", Clean, type nullable text}}), {"薬品名"}),
 
     // ---- 予定の指標 ----
     DayN  = List.Count(List.Distinct(Day[日付])),
@@ -1404,7 +1425,7 @@ let
              {"経過措置期限"}),
     J4 = Table.ExpandTableColumn(Table.NestedJoin(J3, {"薬品名"}, Stock, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"列数"}),
     J5 = Table.ExpandTableColumn(Table.NestedJoin(J4, {"薬品名"}, Grp, {"薬品名"}, "x", JoinKind.LeftOuter), "x",
-             {"成分規格", "需要のまとまり", "先発後発", "供給状況"}),
+             {"成分規格", "需要のまとまり", "先発後発", "供給状況", "切替先"}),
     J6 = Table.ExpandTableColumn(Table.NestedJoin(J5, {"薬品名"}, DayG, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"m"}, {"予定"}),
     J7 = Table.ExpandTableColumn(Table.NestedJoin(J6, {"薬品名"}, MonG, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"m"}, {"出納"}),
 
@@ -1426,7 +1447,17 @@ let
 
     J8 = Table.ExpandTableColumn(Table.NestedJoin(E2, {"薬品名"}, Fudo, {"薬品名"}, "x", JoinKind.LeftOuter), "x",
              {"システム最終払出日", "システム不動日数", "システム在庫", "薬価", "YJコード"}),
-    K1 = Table.AddColumn(J8, "まとまりキー", each [需要のまとまり] ?? [薬品名], type text),
+    // 切替：切替元（この薬を切替先にしている薬）と、まとまりの直近1日平均払出
+    SwSrc = Table.SelectRows(E2, each [切替先] <> null),
+    SwG   = Table.Group(SwSrc, {"切替先"}, {
+                {"切替元", each Text.Combine(List.Sort([薬品名]), "、"), type text},
+                {"切替元の在庫", each List.Sum(List.Transform([最終在庫], (v) => v ?? 0)), type number}}),
+    J8s = Table.ExpandTableColumn(Table.NestedJoin(J8, {"薬品名"}, SwG, {"切替先"}, "x", JoinKind.LeftOuter), "x", {"切替元", "切替元の在庫"}),
+    GrpRate = Table.Group(Table.SelectRows(E2, each [需要のまとまり] <> null), {"需要のまとまり"}, {
+                {"まとまりの直近1日平均払出", each List.Sum(List.Transform([#"直近の1日平均払出"], (v) => v ?? 0)), type number}}),
+    J8r = Table.ExpandTableColumn(Table.NestedJoin(J8s, {"需要のまとまり"}, GrpRate, {"需要のまとまり"}, "x", JoinKind.LeftOuter), "x",
+              {"まとまりの直近1日平均払出"}),
+    K1 = Table.AddColumn(J8r, "まとまりキー", each [需要のまとまり] ?? [薬品名], type text),
     J9 = Table.RemoveColumns(
              Table.ExpandTableColumn(Table.NestedJoin(K1, {"まとまりキー"}, AbcLatest, {"需要のまとまり"}, "x", JoinKind.LeftOuter), "x",
                  {"区分", "量の区分", "患者の最少月"}), {"まとまりキー"}),
@@ -1437,6 +1468,12 @@ let
 
     Fin = Table.AddColumn(E3, "f", each
             [製剤_表示 = [製剤] ?? [製剤_予定],
+             // 切替元（切替先が入っている薬）は区分 D。まとまりの払出が未登録なら自分の値
+             区分_切替 = if [切替先] <> null then "D" else [区分],
+             まとまり払出 = [まとまりの直近1日平均払出] ?? [#"直近の1日平均払出"] ?? 0,
+             切替の使い切り日数 = if [切替先] = null then null
+                                   else let r = [まとまりの直近1日平均払出] ?? [#"直近の1日平均払出"] ?? 0, s = [最終在庫] ?? 0
+                                        in if r > 0 then s / r else null,
              経過措置 = List.Contains(Trans[薬品名], [薬品名]),
              発注除外 = List.Contains(Excl, [薬品名]),
              // 動いた月数は、予定だけの薬でも 0 で入るので「> 0」で見る
@@ -1444,20 +1481,24 @@ let
                         else if ([予定日数] ?? 0) > 0 then "予定だけ" else "出納だけ",
              まとまり内で最多 = List.Contains(TopNames, [薬品名]),
              不動品リスト = List.Contains(FudoNames, [薬品名])]),
-    F2 = Table.ExpandRecordColumn(Fin, "f", {"製剤_表示", "経過措置", "発注除外", "出どころ", "まとまり内で最多", "不動品リスト"}),
+    F2 = Table.ExpandRecordColumn(Table.RemoveColumns(Fin, {"区分", "まとまりの直近1日平均払出"}), "f",
+             {"製剤_表示", "区分_切替", "まとまり払出", "切替の使い切り日数", "経過措置", "発注除外", "出どころ", "まとまり内で最多", "不動品リスト"}),
 
     Out = Table.SelectColumns(F2, {
               "薬品名", "略称", "製剤_表示", "単位", "棚番", "コード", "品名の先頭空白",
               "経過措置", "経過措置期限", "発注除外", "成分規格", "需要のまとまり", "先発後発",
-              "列数", "出どころ", "供給状況", "区分", "量の区分", "患者の最少月"} & PlanCols & PatCols & SuiCols & {"まとまり内で最多",
+              "列数", "出どころ", "供給状況", "区分_切替", "量の区分", "患者の最少月", "切替先", "切替元", "切替元の在庫",
+              "まとまり払出", "切替の使い切り日数"} & PlanCols & PatCols & SuiCols & {"まとまり内で最多",
               "不動品リスト", "システム不動日数", "システム最終払出日", "システム在庫", "薬価", "YJコード"}),
-    Ren = Table.RenameColumns(Out, {{"製剤_表示", "製剤"}}),
+    Ren = Table.RenameColumns(Out, {{"製剤_表示", "製剤"}, {"区分_切替", "区分"}, {"まとまり払出", "まとまりの直近1日平均払出"}}),
     Typed = Table.TransformColumnTypes(Ren, {
               {"略称", type text}, {"製剤", type text}, {"単位", type text}, {"棚番", type text}, {"コード", type text},
               {"品名の先頭空白", Int64.Type}, {"経過措置", type logical}, {"経過措置期限", type date},
               {"発注除外", type logical}, {"成分規格", type text}, {"需要のまとまり", type text}, {"先発後発", type text},
               {"列数", type number}, {"出どころ", type text},
               {"区分", type text}, {"量の区分", type text}, {"患者の最少月", type number},
+              {"切替先", type text}, {"切替元", type text}, {"切替元の在庫", type number},
+              {"まとまりの直近1日平均払出", type number}, {"切替の使い切り日数", type number},
               {"直近の月平均患者数", type number}, {"稼働四半期数", Int64.Type},
               {"予定日数", Int64.Type}, {"予定数量合計", type number}, {"予定患者数合計", type number},
               {"最終予定日", type date}, {"平均間隔", type number}, {"ばらつき（CV²）", type number},
@@ -1532,6 +1573,10 @@ let
                     "㉑ 不動品リスト に載っている（出納の期間より前から動いていない薬も拾う）"},
             {"E04", "期限・制度", "警告", 1, "経過措置品が、まとまりの中で一番出ています。次の屋号を推奨に置き換え、処方の切替を進めてください。",
                     "経過措置期限あり、かつ同じ需要のまとまりの中で直近の払出が最多"},
+            {"E05", "期限・制度", "注意", 2, "切替元です。在庫 {在庫} は切替先の需要で {値}日で使い切る見込みです。返品できる分は返品してください。",
+                    "薬品グループの 切替先 が入っている（0.7.0）。値 ＝ 在庫 ÷ まとまりの直近1日平均払出（払出がなければ空欄）"},
+            {"E06", "期限・制度", "注意", 2, "切替先です。切替元の在庫 {値} がなくなるまで、発注は控えめにしてください。",
+                    "ほかの薬の 切替先 に指定されている（0.7.0）。値 ＝ 切替元の在庫の合計"},
             {"G01", "まとまり",   "注意", 2, "同じまとまりの中で、構成比が {値}ポイント入れ替わりました。出荷調整の可能性があります。",
                     "構成比の前月からの変化 ≧ 設定「出荷調整の構成比の変化」、まとまり全体の変化 ≦ 設定「出荷調整の合計の許容」（⑬）"},
             {"G02", "まとまり",   "注意", 2, "仕入がないまま払い出しが続き、在庫が {値} まで減りました。入荷が止まっている可能性があります。",
@@ -1548,7 +1593,8 @@ in
 //    ・基準日：設定の発注日（空欄なら今日）。経過措置の残り日数に使う
 //    ・線は設定テーブルで変える（下の Num の第2引数は空欄のときの仮の値）
 //    ・S05：直近の在庫日数（M_薬品）で判定。E04：経過措置品がまとまりの中で一番出ている（M_薬品「まとまり内で最多」）
-//    ・D06：区分 D（患者が極端に少ない。M_薬品「区分」「患者の最少月」。0.5.0）。出納だけの薬は Q01 のまま
+//    ・D06：区分 D（患者が極端に少ない。M_薬品「区分」「患者の最少月」。0.5.0）。出納だけの薬は Q01 のまま。切替元は E05 だけ
+//    ・E05／E06：薬品グループの 切替先（0.7.0）。切替元には E05（使い切り日数）、切替先には E06（切替元の在庫）
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -1593,7 +1639,7 @@ let
                 else if typ = "間欠" then {"D03", adi, null}
                 else if typ = "まばら・大口" then {"D04", adi, null} else null,
                 if (r[予定外の月数] ?? 0) >= 1 then {"D05", r[予定外の月数], 1} else null,
-                if r[区分] = "D" and r[出どころ] <> "出納だけ" then {"D06", r[患者の最少月], DLine} else null,
+                if r[区分] = "D" and r[出どころ] <> "出納だけ" and r[切替先] = null then {"D06", r[患者の最少月], DLine} else null,
                 if gr <> null and gr >= GapRate then {"P01", gr * 100, GapRate * 100} else null,
                 if gr <> null and gr <= -GapRate then {"P02", -gr * 100, GapRate * 100} else null,
                 if gs <> null and gs >= GapSize then {"P03", gs * 100, GapSize * 100} else null,
@@ -1601,12 +1647,14 @@ let
                 if left <> null and left < 0 then {"E02", -left, null} else null,
                 if r[発注除外] = true and out > 0 then {"E03", out, null} else null,
                 if trans <> null and topG then {"E04", null, null} else null,
+                if r[切替先] <> null then {"E05", r[切替の使い切り日数], null} else null,
+                if r[切替元] <> null then {"E06", r[切替元の在庫], null} else null,
                 if r[出どころ] = "出納だけ" then {"Q01", null, null} else null,
                 if r[出どころ] = "予定だけ" then {"Q02", null, null} else null
             }),
 
     Rows = List.Combine(Table.TransformRows(Drugs, (r) =>
-               List.Transform(Hits(r), (h) => [薬品名 = r[薬品名], コード = h{0}, 値 = h{1}, 線 = h{2}, 在庫 = r[最終在庫]]))),
+               List.Transform(Hits(r), (h) => [薬品名 = r[薬品名], コード = h{0}, 値 = h{1}, 線 = h{2}, 在庫 = r[最終在庫] ?? 0]))),
     T    = Table.FromRecords(Rows, type table [薬品名 = text, コード = text, 値 = nullable number, 線 = nullable number, 在庫 = nullable number]),
 
     // 文言を作る：{値} {線} {在庫} を数字に置き換える
@@ -1995,7 +2043,7 @@ in
 // ⑮ クエリ名：R_発注点見直し（シート「A_発注点」に表として読み込む）
 //    A 発注点の切り替え提案：区分が前月から変わった、または直近 N ヶ月の払出が前の N ヶ月から
 //    設定「発注点見直しの変化」（初期値 0.2＝±20%）以上動いた「需要のまとまり」だけを載せる
-//    ・代表の薬：まとまりの中で直近の払出が一番多い薬（供給状況が「通常」以外の屋号は後回し）
+//    ・代表の薬：まとまりの中で直近の払出が一番多い薬（切替先に指定された薬を優先、供給状況が「通常」以外と切替元は後回し）
 //    ・発注点の目安 ＝ 直近の1日平均払出 × 設定「発注点の日数」（切り上げ）
 //    ・発注量の目安 ＝ 直近の1日平均払出 × 設定「発注量の日数」（切り上げ）
 //    ・持ち方：回転（直近の1日平均払出 × 30 ≧ 設定「極小需要の月の払出」）× 予測できる（ずれの大きさ < 予測できるずれの線）
@@ -2040,7 +2088,10 @@ let
                          in  if Table.IsEmpty(r) then 0 else r{0}[払出]), type list}}),
 
     // ---- 代表の薬（供給状況が通常以外は後回し、直近の払出が多い順） ----
-    Rep    = Table.Group(Table.AddColumn(DrugK, "k", each if [供給状況] = null or [供給状況] = "通常" then 0 else 1, Int64.Type),
+    Rep    = Table.Group(Table.AddColumn(DrugK, "k", each
+                 if [切替元] <> null then 0
+                 else if [切替先] <> null then 3
+                 else if [供給状況] = null or [供給状況] = "通常" then 1 else 2, Int64.Type),
                  {"まとまり"}, {
                  {"屋号数", each Table.RowCount(_), Int64.Type},
                  {"r", each Table.First(Table.Sort(_, {{"k", Order.Ascending}, {"直近の払出合計", Order.Descending}})), type record}}),
@@ -2109,7 +2160,9 @@ in
 //        同じまとまりの別の屋号が動いていて、直近の在庫日数 ≧ 転送候補の在庫日数 → 他店へ転送／
 //        在庫日数 ≧ 転送候補の在庫日数 → 他店へ転送か返品／それ以外 → 様子見（発注を止める）
 //    ※ 処置の案は目安。最終判断は現場
-//    ・種類：不動／在庫過多（0.6.1 で「区分」から改名。区分 は M_薬品 の A／B／C／D）
+//    ・種類：不動／切替中／在庫過多（0.6.1 で「区分」から改名。区分 は M_薬品 の A／B／C／D）
+//    ・切替中（0.7.0）：薬品グループの 切替先 が入っている薬。不動とはせず、切替先の需要で使い切る見込み日数を出す。
+//      返品できる分は返品し、できない分を使い切る
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -2130,24 +2183,30 @@ let
     Cand   = Table.SelectRows(Drugs, each (([最終在庫] ?? 0) > 0 or ([システム在庫] ?? 0) > 0) and (
                  ([動きのない月数] <> null and [動きのない月数] >= Still) or [不動品リスト] = true
                  or ([直近の在庫日数] <> null and [直近の在庫日数] >= Over)
-                 or ([直近の払出合計] ?? 0) = 0)),
+                 or ([直近の払出合計] ?? 0) = 0
+                 or [切替先] <> null)),
     J      = Table.ExpandTableColumn(
                  Table.NestedJoin(Cand, {"需要のまとまり"}, Alive, {"需要のまとまり"}, "a", JoinKind.LeftOuter), "a", {"動いている屋号"}),
     Calc   = Table.AddColumn(J, "計算", each
         let
-            dead    = ([動きのない月数] <> null and [動きのない月数] >= Still) or [不動品リスト] = true,
+            sw      = [切替先] <> null,
+            dead    = not sw and (([動きのない月数] <> null and [動きのない月数] >= Still) or [不動品リスト] = true),
             perDay  = [直近の1日平均払出] ?? 0,
             stock   = [最終在庫] ?? [システム在庫] ?? 0,
             surplus = List.Max({0, stock - perDay * Horizon}),
             others  = List.Select([動いている屋号] ?? {}, (n) => n <> [薬品名]),
             rdays   = [直近の在庫日数],
-            act     = if dead then "返品（できなければ廃棄か他店へ転送）"
+            useUp   = [切替の使い切り日数],
+            act     = if sw then "切替先「" & [切替先] & "」の需要で使い切る"
+                                & (if useUp = null then "（切替先の払出なし）" else "（見込み " & Text.From(Number.RoundUp(useUp)) & "日）")
+                                & "。返品できる分は返品"
+                      else if dead then "返品（できなければ廃棄か他店へ転送）"
                       else if not List.IsEmpty(others) and (rdays = null or rdays >= TransferD) then
                           "他店へ転送（同じ成分は " & others{0} & " が動いている）"
                       else if rdays <> null and rdays >= TransferD then "他店へ転送か返品"
                       else "様子見（発注を止める）"
         in
-            [種類 = if dead then "不動" else "在庫過多", 並び = if dead then 0 else 1,
+            [種類 = if sw then "切替中" else if dead then "不動" else "在庫過多", 並び = if dead then 0 else if sw then 1 else 2,
              余った量 = surplus, 処置の案 = act]),
     E      = Table.ExpandRecordColumn(Calc, "計算", {"種類", "並び", "余った量", "処置の案"}),
     Out    = Table.SelectColumns(E, {"種類", "薬品名", "略称", "区分", "棚番", "需要のまとまり", "最終在庫", "最後に動いた月", "動きのない月数",
@@ -2171,7 +2230,8 @@ in
 //    期限までに直近の払出ペースで在庫を使い切れるかを見る
 //    ・残り日数 ＝ 経過措置期限 － 基準日（設定の発注日）。期限切迫 ＝ 残り日数 ≦ 設定「期限切迫の日数」
 //    ・期限までに使い切れる量 ＝ 1日平均払出 × 残り日数（0 未満は 0）。余る量 ＝ 在庫 － 使い切れる量
-//    ・代替の屋号：同じ「需要のまとまり」で経過措置のない薬（後発を優先、直近の払出の多い順）
+//    ・代替の屋号：薬品グループの 切替先 があればそれ。なければ同じ「需要のまとまり」で経過措置のない薬（後発を優先、直近の払出の多い順）
+//    ・切替先がある薬は、1日平均払出 に まとまりの直近1日平均払出 を使う（旧品自身の払出は 0 に近いため。0.7.0）
 //    ・処置の案：期限切れ → 返品か廃棄、処方の切替を確認／余る → 返品・転送と発注停止／
 //        使い切れる → 発注量を残り日数分に抑える。代替があれば「在庫がなくなるまで管理を継続」
 //    ※ ロットの使用期限は ⑭ T_ロット（期限切迫リスト）で見る
@@ -2190,7 +2250,8 @@ let
 
     // 代替の屋号：同じまとまりで経過措置のない薬。後発を優先し、直近の払出が多い順
     Alt   = Table.AddColumn(Trans, "代替の屋号", (r) =>
-                if r[需要のまとまり] = null then null
+                if r[切替先] <> null then r[切替先]
+                else if r[需要のまとまり] = null then null
                 else
                     let
                         g = Table.SelectRows(Drugs, each [需要のまとまり] = r[需要のまとまり] and [薬品名] <> r[薬品名] and [経過措置期限] = null),
@@ -2202,7 +2263,7 @@ let
     Calc  = Table.AddColumn(Alt, "計算", each
         let
             left    = Duration.Days([経過措置期限] - BaseDate),
-            perDay  = [#"1日平均払出"] ?? 0,
+            perDay  = if [切替先] <> null then ([まとまりの直近1日平均払出] ?? 0) else ([#"1日平均払出"] ?? 0),
             stock   = [最終在庫] ?? 0,
             usable  = perDay * List.Max({0, left}),
             surplus = List.Max({0, stock - usable}),
@@ -2211,9 +2272,12 @@ let
                       else "使い切れる見込み。発注量を残り日数分に抑える",
             act     = if [代替の屋号] = null then act0 else act0 & "／代替は「" & [代替の屋号] & "」。在庫がなくなるまで管理を継続"
         in
-            [残り日数 = left, 期限切迫 = if left <= Near then "○" else "", 在庫 = stock, 期限までに使い切れる量 = usable, 余る量 = surplus, 処置の案 = act]),
-    E     = Table.ExpandRecordColumn(Calc, "計算", {"残り日数", "期限切迫", "在庫", "期限までに使い切れる量", "余る量", "処置の案"}),
-    Out   = Table.SelectColumns(E, {"薬品名", "略称", "需要のまとまり", "経過措置期限", "残り日数", "期限切迫", "在庫", "1日平均払出",
+            [残り日数 = left, 期限切迫 = if left <= Near then "○" else "", 在庫 = stock, 使う払出 = perDay,
+             期限までに使い切れる量 = usable, 余る量 = surplus, 処置の案 = act]),
+    E     = Table.ExpandRecordColumn(Table.RemoveColumns(Calc, {"1日平均払出"}), "計算",
+                {"残り日数", "期限切迫", "在庫", "使う払出", "期限までに使い切れる量", "余る量", "処置の案"}),
+    Out   = Table.SelectColumns(Table.RenameColumns(E, {{"使う払出", "1日平均払出"}}),
+                {"薬品名", "略称", "需要のまとまり", "経過措置期限", "残り日数", "期限切迫", "在庫", "1日平均払出",
                 "期限までに使い切れる量", "余る量", "代替の屋号", "処置の案"}),
     Typed = Table.TransformColumnTypes(Out, {
                 {"薬品名", type text}, {"略称", type text}, {"需要のまとまり", type text}, {"経過措置期限", type date},
@@ -2845,8 +2909,8 @@ in
 //    ・必要な最大在庫：1 年の日次の予定を「納品と納品の間」（注文は翌営業日に届くとして、同じ次の納品日を持つ日々）で
 //        区切った合計のいちばん大きいもの × (1 ＋ ずれ)。連休でも不足しない在庫の上限の目安（区分 A の薬の管理用）。
 //        卸の営業日は ④ fx_卸の休み（土日・祝日・年末年始・追加休業日）
-//    ・判定：発注しない ＝ 発注除外／供給状況が 供給停止・薬価削除予定（目安は 0）
-//            控えめに   ＝ 区分 D／経過措置品／供給状況 限定／予定より「ずれの注意割合」以上少なく出る薬で、目安 > 0
+//    ・判定：発注しない ＝ 発注除外／供給状況が 供給停止・薬価削除予定／切替元（薬品グループの 切替先 あり。0.7.0）（目安は 0）
+//            控えめに   ＝ 区分 D／経過措置品／供給状況 限定／予定より「ずれの注意割合」以上少なく出る薬／切替先で、目安 > 0
 //            発注する   ＝ それ以外で目安 > 0　　不要 ＝ 目安 0
 //    ・注意：限定出荷／出荷調整の疑い（⑬ G01・G02）／期限の近いロットを先に使う（⑭ 残り日数 ≦ 期限切迫の日数 か 返す量 > 0）／
 //            予定より n% 少なく出る／患者が少ない（区分 D）／経過措置品／予定にない薬／上限を超える（区分 A で 在庫＋目安 > 必要な最大在庫）
@@ -2919,8 +2983,8 @@ let
             cls     = r[区分],
             sup     = r[供給状況],
             excl    = r[発注除外] = true,
-            noOrder = excl or sup = "供給停止" or sup = "薬価削除予定",
-            careful = cls = "D" or r[経過措置] = true or sup = "限定" or gap <= -GapRate,
+            noOrder = excl or sup = "供給停止" or sup = "薬価削除予定" or r[切替先] <> null,
+            careful = cls = "D" or r[経過措置] = true or sup = "限定" or gap <= -GapRate or r[切替元] <> null,
             oq      = if noOrder then 0 else Number.RoundUp(Number.Round(List.Max({0, exp - stock}), 6)),
             overCap = cls = "A" and maxQ > 0 and stock + oq > maxQ,
             notes   = List.RemoveNulls({
@@ -2933,6 +2997,8 @@ let
                           if cls = "D" then "患者が少ない（区分 D）" else null,
                           if r[経過措置] = true then "経過措置品（切替先があれば発注しない）" else null,
                           if r[出どころ] = "出納だけ" then "予定にない薬" else null,
+                          if r[切替先] <> null then "切替元（「" & r[切替先] & "」へ寄せる。在庫を使い切る）" else null,
+                          if r[切替元] <> null then "切替先（切替元の在庫 " & F(r[切替元の在庫]) & " を使い切るまで控えめに）" else null,
                           if overCap then "上限を超える（在庫＋目安 " & F(stock + oq) & " ＞ " & F(maxQ) & "）" else null}),
             note    = Text.Combine(notes, "、"),
             verdict = if noOrder then "発注しない"
@@ -2958,6 +3024,95 @@ let
                {"見込み", type number}, {"発注の目安", type number}, {"必要な最大在庫", type number},
                {"最大の期間", type text}, {"判定", type text}, {"注意", type text}, {"並び", Int64.Type}}),
     Sorted = Table.Sort(Typed, {{"並び", Order.Ascending}, {"略称", Order.Ascending}, {"薬品名", Order.Ascending}}),
+    Result = Table.RemoveColumns(Sorted, {"並び"})
+in
+    Result
+
+
+// ================================================================================
+// ㉕ クエリ名：薬品グループ案（シート「薬品グループ案」に表として読み込む）
+//    薬品名を分解して、手入力テーブル「薬品グループ」に入れる 成分規格・需要のまとまり・先発後発 の案を出す（0.7.0）
+//    ・後発品の名前は「成分名＋剤形＋規格「屋号」」で統一されているので、「屋号」を外せば 成分規格、
+//      剤形（錠・OD錠・カプセルなど）も外せば 需要のまとまり（成分＋規格）になる
+//        例：セルトラリン錠25mg「アメル」／セルトラリンOD錠25mg「トーワ」 → まとまり「セルトラリン 25mg」
+//    ・内用液・細粒・顆粒・外用は単位が違うので、剤形を残して別のまとまりにする
+//    ・先発品（屋号がない）は名前では結べない。「要確認」として残すので、成分名を見て手で同じまとまりに入れる
+//    ・漢方・OTC・「徐放錠A」のような変則の名前も「要確認」
+//    ・案はそのまま使わない。確認してから 薬品グループ に貼る（登録済みのまとまりと違えば「違い」に ○。空白の有無は違いとしない）
+//    ・同じまとまりの屋号数：案が同じ薬が何品目あるか（2 以上なら需要がかぶっている候補）
+// ================================================================================
+let
+    Nz    = #"fx_正規化",
+    Drugs = #"M_薬品",
+    Clean = (v as any) as nullable text => if v = null then null else let t = Text.Trim(Text.From(v)) in if t = "" then null else t,
+
+    // 剤形（長いものから順に照合する）
+    Forms = {"口腔内崩壊錠", "フィルムコーティング錠", "チュアブル錠", "徐放錠", "腸溶錠", "糖衣錠", "OD錠", "錠",
+             "カプセル", "ドライシロップ", "シロップ", "点眼液", "点鼻液", "吸入液", "内用液", "液",
+             "細粒", "顆粒", "散", "テープ", "パップ", "ゲル", "軟膏", "クリーム", "ローション", "坐剤", "注"},
+    TabletForms = {"口腔内崩壊錠", "フィルムコーティング錠", "チュアブル錠", "徐放錠", "腸溶錠", "糖衣錠", "OD錠", "錠", "カプセル"},
+    Digits    = {"0" .. "9"},
+    UnitChars = {"0" .. "9", ".", "m", "g", "μ", "µ", "L", "l", "%", "/", "単", "位"},
+
+    // 末尾の [3g]・(医療用)・(旧) のようなかっこ書きを外す（繰り返し）
+    StripTail = (t as text) as text =>
+        let
+            s      = Text.Trim(t),
+            last   = if s = "" then "" else Text.End(s, 1),
+            opener = if last = "]" then "[" else if last = ")" then "(" else if last = "）" then "（"
+                     else if last = "】" then "【" else if last = "〕" then "〔" else null,
+            p      = if opener = null then -1 else Text.PositionOf(s, opener, Occurrence.Last)
+        in
+            if p < 0 then s else @StripTail(Text.Start(s, p)),
+
+    Parse = (name as text) as record =>
+        let
+            n0     = Nz(name),
+            hasB   = Text.Contains(n0, "「") and Text.Contains(n0, "」"),
+            brand  = if hasB then Text.Trim(Text.BetweenDelimiters(n0, "「", "」")) else null,
+            core   = StripTail(if hasB then Text.BeforeDelimiter(n0, "「") else n0),
+            chars  = Text.ToList(core),
+            dpos   = List.PositionOfAny(chars, Digits),
+            run    = if dpos < 0 then {} else List.FirstN(List.Skip(chars, dpos), each List.Contains(UnitChars, _)),
+            str0   = Text.Replace(Text.TrimEnd(Text.Combine(run), {"/", "."}), "µ", "μ"),
+            okStr  = str0 <> "" and List.ContainsAny(Text.ToList(str0), Digits) and str0 <> Text.Select(str0, Digits & {"."}),
+            head   = Text.Trim(if dpos < 0 then core else Text.Start(core, dpos)),
+            form   = List.First(List.Select(Forms, (f) => Text.EndsWith(head, f)), null),
+            ingr   = Text.Remove(if form = null then head else Text.Start(head, Text.Length(head) - Text.Length(form)), {" ", "　"}),
+            tablet = form <> null and List.Contains(TabletForms, form),
+            grp    = if ingr = "" or not okStr or form = null then null
+                     else if tablet then ingr & " " & str0 else ingr & form & " " & str0,
+            spec   = if ingr = "" then null else ingr & (form ?? "") & (if okStr then str0 else ""),
+            conf   = if brand <> null and form <> null and okStr then "後発（屋号あり）"
+                     else if brand = null and form <> null and okStr then "要確認：屋号なし（先発か旧名称。成分名で結ぶ）"
+                     else if form = null then "要確認：剤形が読めない"
+                     else "要確認：規格が読めない"
+        in
+            [成分案 = if ingr = "" then null else ingr, 剤形 = form, 規格 = if okStr then str0 else null, 屋号 = brand,
+             成分規格案 = spec, まとまり案 = grp, 先発後発案 = if brand <> null then "後発" else null, 確からしさ = conf],
+
+    Base = Table.SelectColumns(Drugs, {"薬品名", "略称", "需要のまとまり"}),
+    P    = Table.ExpandRecordColumn(Table.AddColumn(Base, "p", each Parse([薬品名])), "p",
+               {"成分案", "剤形", "規格", "屋号", "成分規格案", "まとまり案", "先発後発案", "確からしさ"}),
+    Cnt  = Table.Group(Table.SelectRows(P, each [まとまり案] <> null), {"まとまり案"}, {{"同じまとまりの屋号数", each Table.RowCount(_), Int64.Type}}),
+    J    = Table.ExpandTableColumn(Table.NestedJoin(P, {"まとまり案"}, Cnt, {"まとまり案"}, "c", JoinKind.LeftOuter), "c", {"同じまとまりの屋号数"}),
+    Flag = Table.AddColumn(J, "f", each
+               [未登録 = if [需要のまとまり] = null then "○" else "",
+                // 空白の有無だけの違いは違いとみなさない（「アリピプラゾール3mg」と「アリピプラゾール 3mg」）
+                違い   = if [需要のまとまり] <> null and [まとまり案] <> null
+                            and Text.Remove(Nz([需要のまとまり]), {" ", "　"}) <> Text.Remove([まとまり案], {" ", "　"}) then "○" else "",
+                並び   = if [まとまり案] = null then 1 else 0]),
+    E    = Table.ExpandRecordColumn(Flag, "f", {"未登録", "違い", "並び"}),
+    Ren  = Table.RenameColumns(E, {{"成分案", "成分（案）"}, {"成分規格案", "成分規格（案）"}, {"まとまり案", "需要のまとまり（案）"},
+               {"先発後発案", "先発後発（案）"}, {"需要のまとまり", "登録済みのまとまり"}}),
+    Out  = Table.SelectColumns(Ren, {"薬品名", "略称", "成分（案）", "剤形", "規格", "屋号", "成分規格（案）", "需要のまとまり（案）",
+               "先発後発（案）", "確からしさ", "同じまとまりの屋号数", "登録済みのまとまり", "未登録", "違い", "並び"}),
+    Typed = Table.TransformColumnTypes(Out, {
+               {"薬品名", type text}, {"略称", type text}, {"成分（案）", type text}, {"剤形", type text}, {"規格", type text},
+               {"屋号", type text}, {"成分規格（案）", type text}, {"需要のまとまり（案）", type text}, {"先発後発（案）", type text},
+               {"確からしさ", type text}, {"同じまとまりの屋号数", Int64.Type}, {"登録済みのまとまり", type text},
+               {"未登録", type text}, {"違い", type text}, {"並び", Int64.Type}}),
+    Sorted = Table.Sort(Typed, {{"並び", Order.Ascending}, {"需要のまとまり（案）", Order.Ascending}, {"薬品名", Order.Ascending}}),
     Result = Table.RemoveColumns(Sorted, {"並び"})
 in
     Result
