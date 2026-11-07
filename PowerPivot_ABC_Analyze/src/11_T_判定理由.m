@@ -5,6 +5,7 @@
 //    ・基準日：設定の発注日（空欄なら今日）。経過措置の残り日数に使う
 //    ・線は設定テーブルで変える（下の Num の第2引数は空欄のときの仮の値）
 //    ・S05：直近の在庫日数（M_薬品）で判定。E04：経過措置品がまとまりの中で一番出ている（M_薬品「まとまり内で最多」）
+//    ・D06：区分 D（患者が極端に少ない。M_薬品「区分」「患者の最少月」。0.5.0）。出納だけの薬は Q01 のまま
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -15,6 +16,7 @@ let
     OverDays    = Num("在庫過多とみなす日数", 60),
     GapRate     = Num("ずれの注意割合", 0.3),
     GapSize     = Num("ずれの大きさの注意割合", 0.5),
+    DLine       = Num("区分Dの患者数", 2),
     BaseDate    = Prm[発注日],
 
     Codes = Table.Buffer(#"M_理由コード"),
@@ -48,6 +50,7 @@ let
                 else if typ = "間欠" then {"D03", adi, null}
                 else if typ = "まばら・大口" then {"D04", adi, null} else null,
                 if (r[予定外の月数] ?? 0) >= 1 then {"D05", r[予定外の月数], 1} else null,
+                if r[区分] = "D" and r[出どころ] <> "出納だけ" then {"D06", r[患者の最少月], DLine} else null,
                 if gr <> null and gr >= GapRate then {"P01", gr * 100, GapRate * 100} else null,
                 if gr <> null and gr <= -GapRate then {"P02", -gr * 100, GapRate * 100} else null,
                 if gs <> null and gs >= GapSize then {"P03", gs * 100, GapSize * 100} else null,

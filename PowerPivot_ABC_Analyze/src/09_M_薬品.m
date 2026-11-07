@@ -24,6 +24,13 @@
 //      ずれの割合     ：（払出 － 予定）の合計 ÷ 予定の合計
 //      ずれの大きさ   ：月ごとの |払出 － 予定| の合計 ÷ 予定の合計（打ち消し合いを除いた大きさ）
 //      予定外の月数   ：予定が0なのに払出があった月の数（臨時・新患・他科だけで出た月）
+//    【区分】⑫ T_ABC月次 の一番新しい月の行を、需要のまとまり（未登録なら薬品名）でつなぐ（0.5.0）
+//      区分           ：A／B／C／D（⑫ を参照。D は患者が極端に少ない薬で、量より優先）
+//      量の区分       ：月平均払出だけで付けた A／B／C
+//      患者の最少月   ：窓の各月の、まとまりの予定の延べ患者数のいちばん少ない月の値（D の根拠）
+//    【患者の指標】T_月次（予定データのある月）から
+//      直近の月平均患者数：予定データのある月の新しい「ABCの月数」ヶ月の、予定の延べ患者数の月平均（薬ごと）
+//      稼働四半期数   ：読む期間を 3 ヶ月ずつの 4 期に分け、予定の患者がいた期の数（0～4。長期処方の患者の見分けに）
 //    【そのほか】
 //      経過措置期限   ：⑳ 経過措置該当（エリシアSのリスト）を優先し、なければ手入力の経過措置リスト
 //      不動品リスト   ：㉑ 不動品リスト に載っている薬（出納の期間より前から動いていない薬もここで拾う）
@@ -37,6 +44,7 @@ let
                let v = Record.FieldOrDefault(Prm, key, null)
                in  if v = null or (v is text and Text.Trim(v) = "") then dflt else Number.From(v),
     RecentN = Number.RoundDown(Num("直近の月数", 3)),
+    AbcN    = Number.RoundDown(Num("ABCの月数", 3)),
 
     Day  = Table.Buffer(#"T_日次"),
     Mon  = Table.Buffer(#"T_月次"),
@@ -152,6 +160,29 @@ let
              直近の在庫日数 = if stock <> null and recPd <> null and recPd > 0 then stock / recPd else null],
         type record}}),
 
+    // ---- 区分（⑫ の一番新しい月）----
+    Abc       = #"T_ABC月次",
+    AbcLatest = if Table.IsEmpty(Abc) then #table({"需要のまとまり", "区分", "量の区分", "患者の最少月"}, {})
+                else let last = List.Max(Abc[月])
+                     in  Table.Buffer(Table.SelectColumns(Table.SelectRows(Abc, each [月] = last),
+                             {"需要のまとまり", "区分", "量の区分", "患者の最少月"})),
+
+    // ---- 患者の指標（予定データのある月）----
+    PlanMon    = Table.SelectRows(Mon, each [予定データあり]),
+    PlanMonths = List.Buffer(List.Sort(List.Distinct(PlanMon[月]))),
+    RecentPlan = List.Buffer(List.LastN(PlanMonths, AbcN)),
+    QStart     = Date.From(Prm[開始日]),
+    QuarterOf  = (m as date) as number =>
+                     Number.IntegerDivide((Date.Year(m) - Date.Year(QStart)) * 12 + Date.Month(m) - Date.Month(QStart), 3),
+    PatG = Table.Group(PlanMon, {"薬品名"}, {{"m", each
+        let
+            rec = Table.SelectRows(_, each List.Contains(RecentPlan, [月])),
+            nR  = List.Count(RecentPlan),
+            act = Table.SelectRows(_, each ([予定患者数] ?? 0) > 0)[月]
+        in
+            [直近の月平均患者数 = if nR = 0 then null else (List.Sum(rec[予定患者数]) ?? 0) / nR,
+             稼働四半期数 = List.Count(List.Distinct(List.Transform(act, QuarterOf)))], type record}}),
+
     // ---- つなぐ ----
     J1 = Table.ExpandTableColumn(Table.NestedJoin(Base, {"薬品名"}, Abbr, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"略称", "製剤_予定"}),
     J2 = Table.ExpandTableColumn(Table.NestedJoin(J1, {"薬品名"}, SuiAttr, {"品名"}, "x", JoinKind.LeftOuter), "x",
@@ -182,8 +213,16 @@ let
 
     J8 = Table.ExpandTableColumn(Table.NestedJoin(E2, {"薬品名"}, Fudo, {"薬品名"}, "x", JoinKind.LeftOuter), "x",
              {"システム最終払出日", "システム不動日数", "システム在庫", "薬価", "YJコード"}),
+    K1 = Table.AddColumn(J8, "まとまりキー", each [需要のまとまり] ?? [薬品名], type text),
+    J9 = Table.RemoveColumns(
+             Table.ExpandTableColumn(Table.NestedJoin(K1, {"まとまりキー"}, AbcLatest, {"需要のまとまり"}, "x", JoinKind.LeftOuter), "x",
+                 {"区分", "量の区分", "患者の最少月"}), {"まとまりキー"}),
+    J10 = Table.ExpandTableColumn(Table.NestedJoin(J9, {"薬品名"}, PatG, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"m"}, {"患者"}),
+    PatCols = {"直近の月平均患者数", "稼働四半期数"},
+    E3 = Table.ExpandRecordColumn(Table.TransformColumns(J10, {{"患者", each _ ??
+             [直近の月平均患者数 = if List.IsEmpty(RecentPlan) then null else 0, 稼働四半期数 = 0]}}), "患者", PatCols),
 
-    Fin = Table.AddColumn(J8, "f", each
+    Fin = Table.AddColumn(E3, "f", each
             [製剤_表示 = [製剤] ?? [製剤_予定],
              経過措置 = List.Contains(Trans[薬品名], [薬品名]),
              発注除外 = List.Contains(Excl, [薬品名]),
@@ -197,7 +236,7 @@ let
     Out = Table.SelectColumns(F2, {
               "薬品名", "略称", "製剤_表示", "単位", "棚番", "コード", "品名の先頭空白",
               "経過措置", "経過措置期限", "発注除外", "成分規格", "需要のまとまり", "先発後発",
-              "列数", "出どころ", "供給状況"} & PlanCols & SuiCols & {"まとまり内で最多",
+              "列数", "出どころ", "供給状況", "区分", "量の区分", "患者の最少月"} & PlanCols & PatCols & SuiCols & {"まとまり内で最多",
               "不動品リスト", "システム不動日数", "システム最終払出日", "システム在庫", "薬価", "YJコード"}),
     Ren = Table.RenameColumns(Out, {{"製剤_表示", "製剤"}}),
     Typed = Table.TransformColumnTypes(Ren, {
@@ -205,6 +244,8 @@ let
               {"品名の先頭空白", Int64.Type}, {"経過措置", type logical}, {"経過措置期限", type date},
               {"発注除外", type logical}, {"成分規格", type text}, {"需要のまとまり", type text}, {"先発後発", type text},
               {"列数", type number}, {"出どころ", type text},
+              {"区分", type text}, {"量の区分", type text}, {"患者の最少月", type number},
+              {"直近の月平均患者数", type number}, {"稼働四半期数", Int64.Type},
               {"予定日数", Int64.Type}, {"予定数量合計", type number}, {"予定患者数合計", type number},
               {"最終予定日", type date}, {"平均間隔", type number}, {"ばらつき（CV²）", type number},
               {"需要の型", type text}, {"1日平均予定", type number},

@@ -11,7 +11,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from model import Model, Settings, month_start, month_end, months_between, fmt0, DEFAULTS
-from run import abc_monthly, abc_window, r3_expiry, r4_shortage, k6_share
+from run import abc_monthly, r3_expiry, r4_shortage, k6_share, r5_order
 
 DEFAULTS.update(発注点の日数=7, 発注量の日数=21, 転送候補の在庫日数=120, 予測できるずれの線=0.5, 発注点見直しの変化=0.2)
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
@@ -122,9 +122,10 @@ def page_a(model, settings, abc_m):
     months, series = monthly_series(model, key_of)
     n = int(settings.num("ABCの月数"))
     cur_m = months[-1]
-    cur = {k: v for k, v in abc_window(model.T_月次, d, cur_m, n, settings.num("ABCのAの線"), settings.num("ABCのBの線")).items()}
+    as_map = lambda m: {r["需要のまとまり"]: (r["払出"], r["構成比"], r["累積"], r["区分"]) for _, r in abc_m[abc_m["月"] == m].iterrows()}
+    cur = as_map(cur_m)
     prev_m = months[-2] if len(months) >= 2 else None
-    prev = abc_window(model.T_月次, d, prev_m, n, settings.num("ABCのAの線"), settings.num("ABCのBの線")) if prev_m else {}
+    prev = as_map(prev_m) if prev_m else {}
     rop_days, oq_days = settings.num("発注点の日数"), settings.num("発注量の日数")
     chg_line = settings.num("発注点見直しの変化")
     rows = []
@@ -152,9 +153,9 @@ def page_a(model, settings, abc_m):
                          直近=recent, 前=before, 変化=change, 構成比=share, 持ち方=policy, 発注点=rop, 発注量=oq,
                          理由="、".join(reasons), spark=s))
     rows.sort(key=lambda r: (not r["変更"], -(abs(r["変化"]) if r["変化"] is not None else 0)))
-    counts = {c: sum(1 for v in cur.values() if v[3] == c) for c in "ABC"}
+    counts = {c: sum(1 for v in cur.values() if v[3] == c) for c in "ABCD"}
     changed = sum(1 for r in rows if r["変更"])
-    body = [f"<div class='kpi'><div>対象月<b>{cur_m:%Y/%m}</b></div><div>区分 A／B／C<b>{counts['A']}／{counts['B']}／{counts['C']}</b></div>"
+    body = [f"<div class='kpi'><div>対象月<b>{cur_m:%Y/%m}</b></div><div>区分 A／B／C／D<b>{counts['A']}／{counts['B']}／{counts['C']}／{counts['D']}</b></div>"
             f"<div>区分が変わったまとまり<b>{changed}</b></div><div>払出が ±{chg_line*100:.0f}% 以上動いた<b>{sum(1 for r in rows if r['変化'] is not None and abs(r['変化'])>=chg_line)}</b></div></div>",
             "<p class='how'>見方：区分が変わった、または直近の払出が大きく動いたまとまりだけを載せています。発注点の目安 ＝ 直近の1日平均払出 × "
             f"{rop_days:.0f} 日、発注量の目安 ＝ 直近の1日平均払出 × {oq_days:.0f} 日。持ち方は 回転（月の払出が極小需要の線以上）× 予測できるか（ずれの大きさ）で決めています。</p>",
@@ -459,9 +460,36 @@ svg.spark, svg.hbar { vertical-align: middle; }
 """
 
 
+def page_f(model, settings):
+    """F 発注書（来週の分）：㉔ R_発注書 と同じ表"""
+    df = r5_order(model, settings)
+    n_days = int(settings.num("予測日数"))
+    cnt = {k: int((df["判定"] == k).sum()) for k in ("発注する", "控えめに", "発注しない", "不要")} if len(df) else {}
+    body = [f"<div class='kpi'><div>来週<b>{settings.fc_start:%m/%d}～{settings.fc_end:%m/%d}（{n_days} 日）</b></div>"
+            f"<div>発注する<b>{cnt.get('発注する', 0)}</b></div><div>控えめに<b>{cnt.get('控えめに', 0)}</b></div>"
+            f"<div>発注しない<b>{cnt.get('発注しない', 0)}</b></div><div>載せた薬<b>{len(df)}</b></div></div>",
+            "<p class='how'>見方：来週の予定（予測データ）と在庫（発注残込み）の差が 発注の目安（錠）。1 年の実績とのずれで補正しています。"
+            "「発注しない」は不足していても発注しない薬（発注除外・供給停止）。「控えめに」は目安より少なめに。"
+            "必要な最大在庫は、納品が止まる最長の期間（連休）に出る量で、区分 A の薬の在庫の上限の目安です。</p>",
+            "<table><thead><tr><th>区分</th><th>略称</th><th>薬品名</th><th>来週の予定</th><th>患者</th><th>在庫</th><th>不足</th><th>ずれ</th>"
+            "<th>見込み</th><th>発注の目安</th><th>必要な最大在庫</th><th>最大の期間</th><th>判定</th><th>注意</th></tr></thead><tbody>"]
+    for _, r in df.head(70).iterrows():
+        cls = "warn" if r["判定"] == "発注しない" or "上限を超える" in (r["注意"] or "") else ""
+        body.append(f"<tr class='{cls}'><td>{esc(r['区分'] if isinstance(r['区分'], str) else '')}</td><td>{esc(r['略称'] if isinstance(r['略称'], str) else '')}</td>"
+                    f"<td>{esc(r['薬品名'])}</td><td class='num'>{fmt0(r['来週の予定'])}</td><td class='num'>{fmt0(r['来週の患者'])}</td>"
+                    f"<td class='num'>{fmt0(r['在庫'])}</td><td class='num'>{fmt0(r['不足'])}</td><td class='num'>{r['ずれ']*100:+.0f}%</td>"
+                    f"<td class='num'>{fmt0(r['見込み'])}</td><td class='num'><b>{fmt0(r['発注の目安'])}</b></td><td class='num'>{fmt0(r['必要な最大在庫'])}</td>"
+                    f"<td>{esc(r['最大の期間'])}</td><td>{esc(r['判定'])}</td><td>{esc(r['注意'])}</td></tr>")
+    body.append("</tbody></table>")
+    if len(df) > 70:
+        body.append(f"<p class='note'>ほか {len(df)-70} 件はモデル.xlsx の R5_発注書 を参照</p>")
+    return "F 発注書（来週の分）", "来週の予定と在庫から、何をどのくらい発注するかを決める", "".join(body)
+
+
 def build(model, settings, out_html):
     abc_m = abc_monthly(model, settings)
-    pages = [page_a(model, settings, abc_m), page_b(model, settings), page_c(model, settings), page_d(model, settings), page_e(model, settings)]
+    pages = [page_a(model, settings, abc_m), page_b(model, settings), page_c(model, settings), page_d(model, settings), page_e(model, settings),
+             page_f(model, settings)]
     months = sorted(set(model.T_月次.loc[model.T_月次["出納データあり"], "月"]))
     meta = f"対象月 {months[-1]:%Y/%m}　期間 {settings.start:%Y/%m/%d}～{settings.end:%Y/%m/%d}　基準日 {settings.base_date:%Y/%m/%d}　作成 {dt.datetime.now():%Y/%m/%d}　※架空データ"
     parts = []
