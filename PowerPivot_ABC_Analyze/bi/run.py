@@ -15,35 +15,11 @@ from model import Model, Settings, month_start, month_end, months_between, fmt0,
 
 
 # ------------------------------------------------------------------------------
-# ABC 区分（需要のまとまり単位。未登録の薬は薬品名単体）
+# 区分（0.5.0 から model.py の abc_table で計算。ここは互換のための入口）
 # ------------------------------------------------------------------------------
-def abc_window(t_month, m_drug, end_month, n_months, a_line, b_line):
-    """end_month を含む直近 n_months の払出で ABC を付ける。戻り値：まとまり → (払出, 構成比, 累積, 区分)"""
-    start = dt.date(end_month.year, end_month.month, 1)
-    for _ in range(n_months - 1):
-        start = month_start(start - dt.timedelta(days=1))
-    t = t_month[(t_month["月"] >= start) & (t_month["月"] <= end_month) & t_month["出納データあり"]]
-    cl = dict(zip(m_drug["薬品名"], m_drug["需要のまとまり"]))
-    key = t["薬品名"].map(lambda n: cl.get(n) or n)
-    s = t.groupby(key)["払出数量"].sum().sort_values(ascending=False)
-    total = float(s.sum())
-    res, cum = {}, 0.0
-    for k, v in s.items():
-        share = (v / total) if total else 0.0
-        cum += share
-        res[k] = (float(v), share, cum, "A" if cum <= a_line else "B" if cum <= b_line else "C")
-    return res
-
-
 def abc_monthly(model, settings):
-    """T_ABC月次：月 × まとまり の区分（その月を終わりとする直近 n ヶ月）"""
-    n, a, b = int(settings.num("ABCの月数")), settings.num("ABCのAの線"), settings.num("ABCのBの線")
-    months = sorted(set(model.T_月次.loc[model.T_月次["出納データあり"], "月"]))
-    rows = []
-    for m in months:
-        for k, (v, sh, cu, cls) in abc_window(model.T_月次, model.M_薬品, m, n, a, b).items():
-            rows.append(dict(月=m, 需要のまとまり=k, 払出=v, 構成比=sh, 累積=cu, 区分=cls))
-    return pd.DataFrame(rows, columns=["月", "需要のまとまり", "払出", "構成比", "累積", "区分"])
+    """T_ABC月次：月 × まとまり の区分（model.T_ABC月次 と同じ）"""
+    return model.T_ABC月次
 
 
 # ------------------------------------------------------------------------------
@@ -65,7 +41,8 @@ def r1_abc(model, settings, abc_m):
         now = c.loc[k]
         before = p.loc[k, "区分"] if (p is not None and k in p.index) else None
         rows.append(dict(需要のまとまり=k, 薬品名=r["薬品名"], 略称=r["略称"], 先発後発=r["先発後発"],
-                         直近の払出=now["払出"], 構成比=now["構成比"], 累積=now["累積"], 今月の区分=now["区分"], 前月の区分=before,
+                         直近の払出=now["払出"], 構成比=now["構成比"], 累積=now["累積"], 月平均払出=now["月平均払出"], 量の区分=now["量の区分"],
+                         患者の最少月=now["患者の最少月"], 今月の区分=now["区分"], 前月の区分=before,
                          変更=("" if before in (None, now["区分"]) else f"{before}→{now['区分']}"),
                          在庫日数=r["在庫日数"], 需要の型=r["需要の型"], 最終在庫=r["最終在庫"]))
     out = pd.DataFrame(rows)
@@ -159,6 +136,88 @@ def r4_shortage(model, settings):
 STOCK_BINS = [(0, 30, "～30日"), (30, 60, "30～60日"), (60, 90, "60～90日"), (90, 180, "90～180日"), (180, 365, "180～365日"), (365, 1e18, "365日超")]
 
 
+def r5_order(model, settings):
+    """R5 発注書（㉔ R_発注書 と同じ定義）：来週の予定と在庫から発注の目安・判定・注意。区分 → 略称 → 薬品名"""
+    import bisect
+    from model import calendar
+    S = settings
+    gap_r, near = S.num("ずれの注意割合"), S.num("期限切迫の日数")
+    # 来週の予定・患者・在庫（一番新しい日の発注残込み）
+    fcg = {}
+    fc = model.予測データ
+    if len(fc):
+        for n, g in fc.groupby("薬品名"):
+            last = g.sort_values("日付").iloc[-1]
+            st = last["在庫量_発注残込み"] if not pd.isna(last["在庫量_発注残込み"]) else last["在庫量"]
+            fcg[n] = (float(g["数量"].fillna(0).sum()), float(g["患者数"].fillna(0).sum()), None if pd.isna(st) else float(st))
+    # 納品と納品の間（翌営業日納品）に出る予定の最大
+    cal = calendar(S.start, S.end + dt.timedelta(days=14), S)
+    biz = sorted(cal.loc[cal["卸の営業日"], "日付"])
+    def next_biz(d):
+        i = bisect.bisect_right(biz, d)
+        return biz[i] if i < len(biz) else None
+    mx = {}
+    day = model.T_日次
+    if len(day):
+        day = day.assign(納品日=day["日付"].map(next_biz))
+        blk = day.groupby(["薬品名", "納品日"]).agg(量=("予定数量", lambda x: float(x.fillna(0).sum())), 始=("日付", "min"), 終=("日付", "max")).reset_index()
+        for n, g in blk.groupby("薬品名"):
+            r = g.sort_values(["量", "始"], ascending=[False, True]).iloc[0]
+            mx[n] = (float(r["量"]), r["始"], r["終"])
+    # 注意の材料
+    adj = getattr(model, "T_まとまり月次", None)
+    adj_names = set()
+    if adj is not None and len(adj) and "G01" in adj.columns:
+        a = adj[adj["月"] == adj["月"].max()]
+        adj_names = set(a.loc[(a["G01"] == True) | (a["G02"] == True), "薬品名"])
+    lots = model.T_ロット
+    lot_names = set()
+    if len(lots) and "残り日数" in lots.columns:
+        lot_names = set(lots.loc[((lots["残り日数"].notna()) & (lots["残り日数"] <= near)) | (lots["返す量"].fillna(0) > 0), "薬品名"])
+    order_of = {"A": 1, "B": 2, "C": 3, "D": 4}
+    rows = []
+    for _, r in model.M_薬品.iterrows():
+        n = r["薬品名"]
+        g = lambda k: (None if (k not in r.index or pd.isna(r[k])) else r[k])
+        plan, pats, st = fcg.get(n, (0.0, 0.0, None))
+        stock = st if st is not None else (g("最終在庫") or 0.0)
+        gap = g("ずれの割合") or 0.0
+        factor = max(0.0, 1 + gap)
+        exp = plan * factor
+        short = max(0.0, plan - stock)
+        mq = math.ceil(round((mx[n][0] if n in mx else 0.0) * factor, 6))
+        cls, sup = g("区分"), g("供給状況")
+        excl = bool(r["発注除外"]); trans = bool(r["経過措置"])
+        no_order = excl or sup in ("供給停止", "薬価削除予定")
+        careful = cls == "D" or trans or sup == "限定" or gap <= -gap_r
+        oq = 0 if no_order else math.ceil(round(max(0.0, exp - stock), 6))
+        over = cls == "A" and mq > 0 and stock + oq > mq
+        notes = []
+        if excl: notes.append("発注除外")
+        if sup in ("供給停止", "薬価削除予定"): notes.append(sup)
+        if sup == "限定": notes.append("限定出荷")
+        if n in adj_names: notes.append("出荷調整の疑い")
+        if n in lot_names: notes.append("期限の近いロットを先に使う")
+        if gap <= -gap_r: notes.append(f"予定より {fmt0(-gap * 100)}% 少なく出る")
+        if cls == "D": notes.append("患者が少ない（区分 D）")
+        if trans: notes.append("経過措置品（切替先があれば発注しない）")
+        if r["出どころ"] == "出納だけ": notes.append("予定にない薬")
+        if over: notes.append(f"上限を超える（在庫＋目安 {fmt0(stock + oq)} ＞ {fmt0(mq)}）")
+        note = "、".join(notes)
+        verdict = "発注しない" if no_order else "控えめに" if (oq > 0 and careful) else "発注する" if oq > 0 else "不要"
+        if not (plan > 0 or short > 0 or note or cls == "A"):
+            continue
+        period = "" if n not in mx else f"{mx[n][1]:%Y/%m/%d}～{mx[n][2]:%Y/%m/%d}（{(mx[n][2] - mx[n][1]).days + 1}日）"
+        rows.append(dict(区分=cls, 略称=g("略称"), 薬品名=n, 来週の予定=plan, 来週の患者=pats, 在庫=stock, 不足=short, ずれ=gap,
+                         見込み=float(round(exp)), 発注の目安=oq, 必要な最大在庫=mq, 最大の期間=period, 判定=verdict, 注意=note,
+                         並び=order_of.get(cls, 5)))
+    cols = ["区分", "略称", "薬品名", "来週の予定", "来週の患者", "在庫", "不足", "ずれ", "見込み", "発注の目安", "必要な最大在庫", "最大の期間", "判定", "注意"]
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(rows).sort_values(["並び", "略称", "薬品名"], na_position="first").reset_index(drop=True)
+    return df[cols]
+
+
 def stock_bin(days):
     if days is None or (isinstance(days, float) and math.isnan(days)):
         return "払出なし"
@@ -190,7 +249,7 @@ def k0_summary(model, settings, abc_m):
                          在庫数量合計=float(sum(last_stock.values())), 動いた薬品数=int(g["出納に載った"].sum()),
                          不動薬の数=len(dead), 不動薬の在庫=float(sum(last_stock[n] for n in dead)),
                          予定患者数合計=float(g["予定患者数"].fillna(0).sum()), ABC変更数=changed,
-                         A=int((a == "A").sum()), B=int((a == "B").sum()), C=int((a == "C").sum())))
+                         A=int((a == "A").sum()), B=int((a == "B").sum()), C=int((a == "C").sum()), D=int((a == "D").sum())))
     return pd.DataFrame(rows)
 
 
@@ -372,11 +431,12 @@ def main():
     settings = Settings(a.tables)
     model = Model(settings)
     abc_m = abc_monthly(model, settings)
-    R = dict(R1=r1_abc(model, settings, abc_m), R2=r2_dead(model, settings), R3=r3_expiry(model, settings), R4=r4_shortage(model, settings))
+    R = dict(R1=r1_abc(model, settings, abc_m), R2=r2_dead(model, settings), R3=r3_expiry(model, settings), R4=r4_shortage(model, settings),
+             R5=r5_order(model, settings))
     K = dict(K0=k0_summary(model, settings, abc_m), K1=k1_stock_bins(model), K2=k2_quadrant(model, settings), K4=k4_loss(model), K6=k6_share(model))
     sheets = [("T_日次", model.T_日次), ("T_月次", model.T_月次), ("M_日付", model.M_日付), ("M_薬品", model.M_薬品),
               ("M_理由コード", model.M_理由コード), ("T_判定理由", model.T_判定理由), ("T_ロット", model.T_ロット), ("T_ABC月次", abc_m),
-              ("R1_ABC区分表", R["R1"]), ("R2_不動薬の処理候補", R["R2"]), ("R3_経過措置・期限切迫", R["R3"]), ("R4_出荷調整の可能性", R["R4"]),
+              ("R1_ABC区分表", R["R1"]), ("R2_不動薬の処理候補", R["R2"]), ("R3_経過措置・期限切迫", R["R3"]), ("R4_出荷調整の可能性", R["R4"]), ("R5_発注書", R["R5"]),
               ("K0_月次サマリー", K["K0"]), ("K1_在庫日数の分布", K["K1"]), ("K2_4象限_薬品数", K["K2"][0]), ("K2_4象限_在庫", K["K2"][1]),
               ("K4_ロス_月別", K["K4"][0]), ("K4_ロス_薬品別", K["K4"][1]), ("K6_屋号の構成比", K["K6"]), ("出納", model.出納)]
     xp = os.path.join(a.out, "モデル.xlsx")

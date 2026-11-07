@@ -39,11 +39,11 @@ let
             [処置の案 = act, 注意 = if warn then "○" else "", 並び = if excl then 1 else 0]),
     E0    = Table.ExpandRecordColumn(Calc, "計算", {"処置の案", "注意", "並び"}),
     E     = Table.TransformColumns(E0, {{"発注除外", each if _ = true then "○" else "", type text}}),
-    Out   = Table.SelectColumns(E, {"薬品名", "略称", "需要の型", "平均間隔", "予定患者数合計", "直近の払出合計", "最終在庫",
+    Out   = Table.SelectColumns(E, {"薬品名", "略称", "区分", "需要の型", "平均間隔", "予定患者数合計", "直近の払出合計", "最終在庫",
                 "直近の在庫日数", "最後に動いた月", "動いた月数", "発注除外", "注意", "処置の案", "並び"}),
     Ren   = Table.RenameColumns(Out, {{"予定患者数合計", "年間の予定患者数"}, {"直近の払出合計", "直近の払出"}, {"最終在庫", "在庫"}}),
     Typed = Table.TransformColumnTypes(Ren, {
-                {"薬品名", type text}, {"略称", type text}, {"需要の型", type text}, {"平均間隔", type number},
+                {"薬品名", type text}, {"略称", type text}, {"区分", type text}, {"需要の型", type text}, {"平均間隔", type number},
                 {"年間の予定患者数", type number}, {"直近の払出", type number}, {"在庫", type number}, {"直近の在庫日数", type number},
                 {"最後に動いた月", type date}, {"動いた月数", Int64.Type}, {"発注除外", type text}, {"注意", type text},
                 {"処置の案", type text}, {"並び", Int64.Type}}),

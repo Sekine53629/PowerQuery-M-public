@@ -10,6 +10,7 @@
 //        回らない×できる → 持たずに取り寄せ／回らない×できない → 持たない
 //    ・月01～月12：直近12ヶ月（出納のある月）の払出。月12 が一番新しい月（スパークライン用）
 //    ・区分変更：変わったら「○」（印刷して読む表なので、真偽ではなく印にする）
+//    ・今月の区分：⑫ の区分（A／B／C／D）。量の区分・月平均払出・月平均患者数 は区分の根拠（0.5.0）
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -90,12 +91,13 @@ let
                {"直近の払出", "前の払出", "変化", "変化の大きさ", "持ち方", "発注点の目安", "発注量の目安", "理由", "区分変更", "対象"} & MonthCols),
     Sel  = Table.SelectRows(E, each [対象]),
     Per  = Table.AddColumn(Sel, "期間", (x) => Date.ToText(List.First(Last12), "yyyy/MM") & "～" & Date.ToText(Cur, "yyyy/MM"), type text),
-    Out  = Table.SelectColumns(Per, {"需要のまとまり", "屋号数", "代表の薬", "前月の区分", "区分", "区分変更", "直近の払出", "前の払出", "変化",
-               "構成比", "持ち方", "発注点の目安", "発注量の目安", "理由", "期間"} & MonthCols & {"変化の大きさ"}),
+    Out  = Table.SelectColumns(Per, {"需要のまとまり", "屋号数", "代表の薬", "前月の区分", "区分", "区分変更", "量の区分", "月平均払出", "月平均患者数",
+               "直近の払出", "前の払出", "変化", "構成比", "持ち方", "発注点の目安", "発注量の目安", "理由", "期間"} & MonthCols & {"変化の大きさ"}),
     Ren  = Table.RenameColumns(Out, {{"区分", "今月の区分"}}),
     Typed = Table.TransformColumnTypes(Ren, {
                {"需要のまとまり", type text}, {"屋号数", Int64.Type}, {"代表の薬", type text}, {"前月の区分", type text},
-               {"今月の区分", type text}, {"区分変更", type text}, {"直近の払出", type number}, {"前の払出", type number},
+               {"今月の区分", type text}, {"区分変更", type text}, {"量の区分", type text}, {"月平均払出", type number},
+               {"月平均患者数", type number}, {"直近の払出", type number}, {"前の払出", type number},
                {"変化", Percentage.Type}, {"構成比", Percentage.Type}, {"持ち方", type text},
                {"発注点の目安", type number}, {"発注量の目安", type number}, {"理由", type text}, {"期間", type text},
                {"変化の大きさ", type number}} & List.Transform(MonthCols, (c) => {c, type number})),

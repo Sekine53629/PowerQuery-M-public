@@ -4,7 +4,7 @@
 #     そのときはこのスクリプトをもう一度実行する（何度実行しても同じ結果になる）
 # 使い方（プロジェクトのフォルダで）：
 #   pwsh -File tools\excel_format.ps1 -Book prototype\ABC分析.xlsx [-Pdf <出力.pdf>]
-#   -Pdf を付けると A〜E を 1 本の PDF に印刷して確認できる
+#   -Pdf を付けると A〜F を 1 本の PDF に印刷して確認できる
 # 注意：開発用（自宅 PC）。ブックは保存する（クエリ・接続は触らない）
 param(
     [Parameter(Mandatory = $true)][string]$Book,
@@ -24,24 +24,28 @@ $DARKRED = 0x0000C0
 $WIDTH = @{
     "需要のまとまり" = 26; "薬品名" = 30; "代表の薬" = 30; "略称" = 11; "棚番" = 7; "代替の屋号" = 26;
     "処置の案" = 48; "切替・転送の案" = 60; "理由" = 34; "状態" = 24; "持ち方" = 14; "役割" = 16; "需要の型" = 11;
-    "区分" = 8; "前月の区分" = 6; "今月の区分" = 6; "区分変更" = 5; "屋号数" = 5; "行順" = 4; "疑い" = 8;
-    "期間" = 15; "先発後発" = 7; "供給状況" = 8; "期限切迫" = 5; "発注除外" = 5; "注意" = 5
+    "区分" = 8; "前月の区分" = 6; "今月の区分" = 6; "区分変更" = 5; "量の区分" = 6; "屋号数" = 5; "行順" = 4; "疑い" = 8;
+    "期間" = 15; "先発後発" = 7; "供給状況" = 8; "期限切迫" = 5; "発注除外" = 5; "注意" = 5; "判定" = 10; "最大の期間" = 26
 }
 $FMT = @{
     "直近の払出" = "#,##0"; "前の払出" = "#,##0"; "発注点の目安" = "#,##0"; "発注量の目安" = "#,##0"; "在庫" = "#,##0";
     "余った量" = "#,##0"; "余る量" = "#,##0"; "期限までに使い切れる量" = "#,##0"; "先月の仕入" = "#,##0"; "まとまりの払出" = "#,##0";
     "年間の予定患者数" = "#,##0"; "在庫日数" = "#,##0"; "直近の在庫日数" = "#,##0"; "システム不動日数" = "#,##0"; "残り日数" = "#,##0";
     "動きのない月数" = "0"; "動いた月数" = "0"; "屋号数" = "0"; "行順" = "0";
-    "直近の1日平均払出" = "0.0"; "1日平均払出" = "0.0"; "平均間隔" = "0.0";
+    "直近の1日平均払出" = "0.0"; "1日平均払出" = "0.0"; "平均間隔" = "0.0"; "月平均患者数" = "0.0"; "月平均払出" = "#,##0";
+    "来週の予定" = "#,##0"; "来週の患者" = "#,##0"; "不足" = "#,##0"; "見込み" = "#,##0"; "発注の目安" = "#,##0"; "必要な最大在庫" = "#,##0"; "ずれ" = "+0%;-0%;0%";
     "変化" = "+0%;-0%;0%"; "構成比" = "0%";
     "最後に動いた月" = "yyyy/mm"; "システム最終払出日" = "yyyy/mm/dd"; "経過措置期限" = "yyyy/mm/dd"
 }
-$WRAP = @("処置の案", "切替・転送の案", "理由", "状態")
+$WRAP = @("処置の案", "切替・転送の案", "理由", "状態", "注意")
 
 # 条件付き書式：シートごとに (列, 種類, 値, 塗り, 文字色, 太字)。種類：eq（等しい）/ contains（含む）/ ge（以上）/ le（以下）/ lt（未満）/ true
 $CF = @{
+    "F_発注書" = @(
+        @("判定", "eq", "発注しない", $null, $GRAY, $true), @("判定", "eq", "控えめに", $YELLOW, $null, $false),
+        @("注意", "contains", "上限を超える", $RED, $null, $false), @("発注の目安", "ge", 1, $null, $null, $true))
     "A_発注点" = @(
-        @("区分変更", "eq", "○", $YELLOW, $null, $true),
+        @("区分変更", "eq", "○", $YELLOW, $null, $true), @("今月の区分", "eq", "D", $null, $GRAY, $true),
         @("変化", "ge", 0.2, $RED, $null, $false), @("変化", "le", -0.2, $BLUE, $null, $false),
         @("持ち方", "contains", "持たない", $null, $GRAY, $false))
     "B_不動在庫" = @(
@@ -65,7 +69,7 @@ $SPARK = @{
     "D_出荷調整" = @("構成比_月01", "構成比_月12", "12ヶ月の構成比", 1)
 }
 $TITLE = @{ "A_発注点" = "A 発注点の切り替え提案"; "B_不動在庫" = "B 不動在庫と転送・返品推奨"; "C_経過措置" = "C 経過措置・期限切迫品";
-            "D_出荷調整" = "D 出荷調整の管理票"; "E_極小需要" = "E 要管理の極小需要薬" }
+            "D_出荷調整" = "D 出荷調整の管理票"; "E_極小需要" = "E 要管理の極小需要薬"; "F_発注書" = "F 発注書（来週の分）" }
 
 function ColIndex($lo, $name) { for ($i = 1; $i -le $lo.ListColumns.Count; $i++) { if ($lo.ListColumns.Item($i).Name -eq $name) { return $i } }; return 0 }
 
@@ -84,7 +88,8 @@ try {
         # 列幅・表示形式・折り返し
         for ($i = 1; $i -le $lo.ListColumns.Count; $i++) {
             $c = $lo.ListColumns.Item($i); $n = $c.Name; $rng = $c.Range
-            if ($WIDTH.ContainsKey($n)) { $rng.EntireColumn.ColumnWidth = $WIDTH[$n] } elseif ($n -match '^(構成比_)?月\d\d$') { $rng.EntireColumn.ColumnWidth = 5 } else { $rng.EntireColumn.ColumnWidth = 9 }
+            if ($sn -eq "F_発注書" -and $n -eq "注意") { $rng.EntireColumn.ColumnWidth = 60 }   # F の注意は文（E の注意は「○」）
+            elseif ($WIDTH.ContainsKey($n)) { $rng.EntireColumn.ColumnWidth = $WIDTH[$n] } elseif ($n -match '^(構成比_)?月\d\d$') { $rng.EntireColumn.ColumnWidth = 5 } else { $rng.EntireColumn.ColumnWidth = 9 }
             if ($FMT.ContainsKey($n)) { $rng.NumberFormatLocal = $FMT[$n]; $rng.HorizontalAlignment = -4152 }
             if ($WRAP -contains $n) { $rng.WrapText = $true; $rng.VerticalAlignment = -4160 }
         }
@@ -114,11 +119,12 @@ try {
 
         # 条件付き書式（テーブルの列全体に付けるので、行が増えても効く）
         if ($CF.ContainsKey($sn)) {
+            # 先に表の中の条件付き書式を全部消す（列を足したときに隣の規則が伸びていることがある。同じ列に 2 つ目の規則を足すときに 1 つ目を消さないため）
+            if ($null -ne $lo.DataBodyRange) { $lo.DataBodyRange.FormatConditions.Delete() }
             foreach ($rule in $CF[$sn]) {
                 $n, $kind, $val, $fill, $font, $bold = $rule
                 $i = ColIndex $lo $n; if ($i -eq 0) { continue }
                 $rng = $lo.ListColumns.Item($i).DataBodyRange; if ($null -eq $rng) { continue }
-                $rng.FormatConditions.Delete()
                 switch ($kind) {
                     "eq"       { $fc = $rng.FormatConditions.Add(1, 3, ('="' + $val + '"')) }      # xlCellValue, xlEqual
                     "ge"       { $fc = $rng.FormatConditions.Add(1, 7, [string]$val) }             # xlGreaterEqual
@@ -147,7 +153,7 @@ try {
         Write-Host ($sn + "：体裁を付けた（" + $lo.ListRows.Count + " 行）")
     }
     if ($Pdf) {
-        $wb.Worksheets.Item(@("A_発注点", "B_不動在庫", "C_経過措置", "D_出荷調整", "E_極小需要")).Select() | Out-Null
+        $wb.Worksheets.Item(@("A_発注点", "B_不動在庫", "C_経過措置", "D_出荷調整", "E_極小需要", "F_発注書")).Select() | Out-Null
         $xl.ActiveSheet.ExportAsFixedFormat(0, [IO.Path]::GetFullPath($Pdf)) | Out-Null
         $wb.Worksheets.Item("A_発注点").Select() | Out-Null
         Write-Host ("PDF: " + $Pdf)

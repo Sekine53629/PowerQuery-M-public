@@ -99,7 +99,10 @@ def months_between(a, b):
 DEFAULTS = dict(不動とみなす月数=3, 在庫過多とみなす日数=60,
                 ずれの注意割合=0.3, ずれの大きさの注意割合=0.5,
                 # 月次レポート用（0.2.0 で設定テーブルに追加する項目。空欄なら初期値）
-                当面の予定日数=30, ABCの月数=3, ABCのAの線=0.7, ABCのBの線=0.9,
+                当面の予定日数=30, ABCの月数=3,
+                # 0.5.0：区分は量の固定線（錠／月）と予定の患者数で付ける（累積構成比の線 ABCのAの線・ABCのBの線 は廃止）
+                区分Aの線=1000, 区分Bの線=300, 区分Dの患者数=2,
+                予測日数=7,                      # 0.6.0：発注書 F が読む来週の日数
                 出荷調整の構成比の変化=0.3, 出荷調整の合計の許容=0.3, 期限切迫の日数=180, 直近の月数=3,
                 # 0.3.0：包装単位を使わない。極小需要の線は「月の払出」1 本（G02・A の回転・E）
                 極小需要の月の払出=100)
@@ -131,6 +134,10 @@ class Settings:
         fc_start = to_date(self.raw.get("予測開始日")) or (self.base_date + dt.timedelta(days=1))
         self.end = to_date(self.raw.get("終了日")) or (fc_start - dt.timedelta(days=1))
         self.start = to_date(self.raw.get("開始日")) or month_start(add_years(self.end, -1) + dt.timedelta(days=1))
+        # 発注書 F：来週（予測開始～予測終了）。予測フォルダパスが空欄なら実績フォルダ（当月の予測データに月末までの予定がある）
+        self.fc_start = fc_start
+        self.fc_end = fc_start + dt.timedelta(days=int(self.num("予測日数")) - 1)
+        self.fc_folder = self.text("予測フォルダパス") or self.folder
         ye_s, ye_e = self.raw.get("年末年始の休み始め") or "12/29", self.raw.get("年末年始の休み終わり") or "1/3"
         self.ye_start = tuple(int(x) for x in str(ye_s).replace("-", "/").split("/")[-2:])
         self.ye_end = tuple(int(x) for x in str(ye_e).replace("-", "/").split("/")[-2:])
@@ -270,8 +277,9 @@ def _plan_parts(sheet, rows, kind, fy, fm, d8, start, end):
     return [(d, rows)] if start <= d <= end else []
 
 
-def load_plan(folder, start, end, prefix="薬品使用量"):
-    """日次データ：日付／薬品区分／略称／薬品名／患者数／数量／在庫量／在庫量_発注残込み／ファイル名／シート名"""
+def load_plan(folder, start, end, prefix="薬品使用量", keep_zero=False):
+    """日次データ：日付／薬品区分／略称／薬品名／患者数／数量／在庫量／在庫量_発注残込み／ファイル名／シート名
+       keep_zero：True なら数量も患者数も 0 の行も残す（在庫だけ見たいとき。② の keepZero と同じ）"""
     files = [f for f in list_files(folder) if os.path.basename(f).startswith(prefix)]
     recs = {}   # (date) -> (sortkey, rows)
     for f in sorted(files):
@@ -302,7 +310,7 @@ def load_plan(folder, start, end, prefix="薬品使用量"):
                     if not drug or norm_col(drug) in ("合計", "総合計", "小計", norm_col(COLS["薬品名"])):
                         continue
                     q, p = num(get("数量")), num(get("患者数"))
-                    if not ((q is not None and q > 0) or (p is not None and p > 0)):
+                    if not keep_zero and not ((q is not None and q > 0) or (p is not None and p > 0)):
                         continue
                     out.append(dict(日付=d, 薬品区分=nz(get("薬品区分")), 略称=(str(get("略称")).strip() if get("略称") is not None else None),
                                     薬品名=drug, 患者数=p, 数量=q, 在庫量=num(get("在庫量")), 在庫量_発注残込み=num(get("在庫量込み")),
@@ -505,13 +513,18 @@ def calendar(lo, hi, settings):
     rows = []
     d = lo
     while d <= hi:
+        # ④ fx_卸の休み と同じ順：追加休業日 → 祝日 → 年末年始 → 土曜 → 日曜（土曜も卸は休み）
         why = None
-        if d.weekday() == 6:
-            why = "日曜"
-        elif year_end(d):
-            why = "年末年始"
+        if d in extra:
+            why = extra[d]
         elif d in hol:
             why = hol[d]
+        elif year_end(d):
+            why = "年末年始"
+        elif d.weekday() == 5:
+            why = "土曜"
+        elif d.weekday() == 6:
+            why = "日曜"
         rows.append(dict(日付=d, 曜日=WD[d.weekday()], 卸の営業日=why is None, 休みの理由=why))
         d += dt.timedelta(days=1)
     return pd.DataFrame(rows)
@@ -530,6 +543,8 @@ REASON_CODES = [
     ("D03", "需要", "情報", 3, "需要は間欠的です。（平均 {値}日に1回）"),
     ("D04", "需要", "注意", 2, "需要はまばらで、出るときは大口です。（平均 {値}日に1回）"),
     ("D05", "需要", "注意", 2, "予定にない払出だけの月が {値}ヶ月あります。（臨時・新患・他科）"),
+    # 0.5.0：区分 D（患者が極端に少ない。出納だけの薬は Q01 のまま）
+    ("D06", "需要", "注意", 2, "予定の患者が月 {値}人しかいません。（線 {線}人）区分 D：在庫は手で管理する薬です"),
     ("P01", "予定とのずれ", "注意", 2, "予定より {値}% 多く出ています。（臨時・飛び処方・再来局）"),
     ("P02", "予定とのずれ", "注意", 2, "予定より {値}% 少なく出ています。（処方終了・残薬調整）"),
     ("P03", "予定とのずれ", "情報", 3, "月ごとに予定と {値}% ずれます。"),
@@ -554,17 +569,68 @@ def fmt0(n):
     return "" if n is None or (isinstance(n, float) and math.isnan(n)) else f"{round(n):,}"
 
 
+# ------------------------------------------------------------------------------
+# 区分（⑫ T_ABC月次）：需要のまとまり単位。未登録の薬は薬品名単体（0.5.0）
+#   量の区分：直近 n ヶ月の月平均払出 ≧ 区分Aの線 → A、≧ 区分Bの線 → B、それ未満 → C
+#   区分    ：窓の各月（予定データのある月だけ）の、まとまりの予定の延べ患者数の最少が 区分Dの患者数 未満 → D。
+#             予定の行がない月は 0 人。窓に予定データの月がなければ 量の区分 のまま
+# ------------------------------------------------------------------------------
+def abc_table(t_month, grp_map, n, a_line, b_line, d_line):
+    """戻り値：T_ABC月次（月・需要のまとまり・払出・構成比・累積・月平均払出・量の区分・患者の最少月・月平均患者数・区分・前月の区分・変更）"""
+    cols = ["月", "需要のまとまり", "払出", "構成比", "累積", "月平均払出", "量の区分", "患者の最少月", "月平均患者数", "区分", "前月の区分", "変更"]
+    if t_month.empty:
+        return pd.DataFrame(columns=cols)
+    t = t_month.assign(まとまり=t_month["薬品名"].map(lambda x: grp_map.get(x) or x))
+    sui = t[t["出納データあり"]]
+    months = sorted(set(sui["月"]))
+    pl = t[t["予定データあり"]]
+    pat = pl.groupby(["月", "まとまり"])["予定患者数"].sum()
+    plan_months = set(pl["月"])
+    rows, prev_cls = [], {}
+    for i, m in enumerate(months):
+        win = months[max(0, i + 1 - n):i + 1]
+        w = sui[sui["月"].isin(win)]
+        s = w.groupby("まとまり")["払出数量"].sum()
+        # その月までに一度でも出たまとまりは、窓に払出がなくても行を作る（払出 0）
+        seen = set(sui.loc[sui["月"] <= m, "まとまり"]) | set(pl.loc[pl["月"] <= m, "まとまり"])
+        vals = {k: (float(s[k]) if k in s.index and not pd.isna(s[k]) else 0.0) for k in seen}
+        items = sorted(vals.items(), key=lambda kv: (-kv[1], kv[0]))
+        total = sum(v for _, v in items)
+        win_p = [x for x in win if x in plan_months]
+        cum, cur_cls = 0.0, {}
+        for k, v in items:
+            share = (v / total) if total else 0.0
+            cum += share
+            avg = v / len(win) if win else 0.0
+            q = "A" if avg >= a_line else "B" if avg >= b_line else "C"
+            if win_p:
+                vals = [float(pat.get((pm, k), 0.0) or 0.0) for pm in win_p]
+                pmin, pavg = min(vals), sum(vals) / len(win_p)
+            else:
+                pmin = pavg = None
+            cls = "D" if (pmin is not None and pmin < d_line) else q
+            before = prev_cls.get(k)
+            rows.append(dict(月=m, 需要のまとまり=k, 払出=v, 構成比=share, 累積=(cum if total else 0.0), 月平均払出=avg, 量の区分=q,
+                             患者の最少月=pmin, 月平均患者数=pavg, 区分=cls, 前月の区分=before,
+                             変更=("" if before in (None, cls) else f"{before}→{cls}")))
+            cur_cls[k] = cls
+        prev_cls = cur_cls
+    return pd.DataFrame(rows, columns=cols)
+
+
 class Model:
     def __init__(self, settings: Settings):
         self.s = settings
         S = settings
         self.日次データ = load_plan(S.folder, S.start, S.end)
+        self.予測データ = load_plan(S.fc_folder, S.fc_start, S.fc_end, keep_zero=True)      # 発注書 F（来週）
         self.出納 = load_suitou(S.sui_folder, S.start, S.end)
         self.経過措置該当 = keika_list(S.keika_folder)
         self.期限切れリスト = kigen_list(S.kigen_folder)
         self.不動品リスト = fudo_list(S.fudo_folder)
         self.T_日次 = self._t_day()
         self.T_月次 = self._t_month()
+        self.T_ABC月次 = self._t_abc()
         self.M_日付 = self._m_date()
         self.M_理由コード = pd.DataFrame(REASON_CODES, columns=["コード", "分類", "種類", "優先度", "文言"])
         self.M_薬品 = self._m_drug()
@@ -615,6 +681,18 @@ class Model:
                              予定とのずれ=gap, ずれの割合=((gap / plan) if (gap is not None and plan and plan > 0) else None)))
         t = pd.DataFrame(rows)
         return t.sort_values(["月", "薬品名"]).reset_index(drop=True)
+
+    # ⑫（M_薬品 より先に作る。M_薬品 が区分を参照する）
+    def _t_abc(self):
+        S = self.s
+        grp = S.tables["薬品グループ"]
+        grp_map = {}
+        if len(grp) and "薬品名" in grp.columns and "需要のまとまり" in grp.columns:
+            for _, r in grp.iterrows():
+                k, v = nz(r["薬品名"]), nz(r["需要のまとまり"])
+                if k and k not in grp_map:
+                    grp_map[k] = v
+        return abc_table(self.T_月次, grp_map, int(S.num("ABCの月数")), S.num("区分Aの線"), S.num("区分Bの線"), S.num("区分Dの患者数"))
 
     # ⑧
     def _m_date(self):
@@ -693,6 +771,23 @@ class Model:
             plan_rows[n] = dict(予定日数=cnt, 予定数量合計=tot, 予定患者数合計=float(g["予定患者数"].sum()),
                                 最終予定日=(g.loc[g["予定数量"].fillna(0) > 0, "日付"].max() if cnt else None),
                                 平均間隔=adi, **{"ばらつき（CV²）": cv2}, 需要の型=typ, **{"1日平均予定": (tot / day_n if day_n and tot is not None else None)})
+        # 区分（⑫ の一番新しい月）と患者の指標（予定データのある月）
+        abc = self.T_ABC月次
+        latest = abc[abc["月"] == abc["月"].max()] if len(abc) else abc
+        abc_map = {r["需要のまとまり"]: r for _, r in latest.iterrows()}
+        pl = mon[mon["予定データあり"]]
+        plan_months = sorted(set(pl["月"]))
+        abc_n = int(S.num("ABCの月数"))
+        recent_plan = plan_months[-abc_n:] if plan_months else []
+        q0 = S.start
+        quarter_of = lambda m: ((m.year - q0.year) * 12 + m.month - q0.month) // 3
+        pat_rows = {}
+        for n, g in pl.groupby("薬品名"):
+            rec = g[g["月"].isin(recent_plan)]
+            act = g.loc[g["予定患者数"].fillna(0) > 0, "月"]
+            pat_rows[n] = dict(直近の月平均患者数=(None if not recent_plan else float(rec["予定患者数"].fillna(0).sum()) / len(recent_plan)),
+                               稼働四半期数=len({quarter_of(m) for m in act}))
+        pat_default = dict(直近の月平均患者数=(None if not recent_plan else 0.0), 稼働四半期数=0)
         # 出納の指標
         sm = mon[mon["出納データあり"]]
         sui_months = sorted(set(sm["月"]))
@@ -751,8 +846,15 @@ class Model:
                      先発後発=(gr_map[n]["先発後発"] if n in gr_map else None), 列数=cols_n,
                      出どころ=("予定・出納" if (p.get("予定日数", 0) or 0) > 0 and (m.get("動いた月数", 0) or 0) > 0
                                else "予定だけ" if (p.get("予定日数", 0) or 0) > 0 else "出納だけ"))
+            key = (gr_map[n]["需要のまとまり"] if n in gr_map and isinstance(gr_map[n]["需要のまとまり"], str) else None) or n
+            ab = abc_map.get(key)
+            r["区分"] = ab["区分"] if ab is not None else None
+            r["量の区分"] = ab["量の区分"] if ab is not None else None
+            r["患者の最少月"] = (None if ab is None or pd.isna(ab["患者の最少月"]) else float(ab["患者の最少月"]))
             for c in plan_cols:
                 r[c] = p.get(c)
+            for c, v in (pat_rows.get(n) or pat_default).items():
+                r[c] = v
             for c in sui_cols:
                 r[c] = m.get(c)
             recs.append(r)
@@ -794,6 +896,7 @@ class Model:
         S = self.s
         still_m, over_d = S.num("不動とみなす月数"), S.num("在庫過多とみなす日数")
         gap_r, gap_s, base = S.num("ずれの注意割合"), S.num("ずれの大きさの注意割合"), S.base_date
+        d_line = S.num("区分Dの患者数")
         codes = {c[0]: c for c in REASON_CODES}
         # まとまりの中で直近の払出が一番多い薬（経過措置品がここにいれば E04）
         md = self.M_薬品
@@ -817,6 +920,7 @@ class Model:
             dmap = {"安定": "D01", "ばらつき大": "D02", "間欠": "D03", "まばら・大口": "D04"}
             if typ in dmap: hits.append((dmap[typ], adi, None))
             if (g("予定外の月数") or 0) >= 1: hits.append(("D05", g("予定外の月数"), 1))
+            if g("区分") == "D" and r["出どころ"] != "出納だけ": hits.append(("D06", g("患者の最少月"), d_line))
             if gr is not None and gr >= gap_r: hits.append(("P01", gr * 100, gap_r * 100))
             if gr is not None and gr <= -gap_r: hits.append(("P02", -gr * 100, gap_r * 100))
             if gs is not None and gs >= gap_s: hits.append(("P03", gs * 100, gap_s * 100))

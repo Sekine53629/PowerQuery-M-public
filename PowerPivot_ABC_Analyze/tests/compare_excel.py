@@ -1,6 +1,6 @@
 """Excel の結果（tools/excel_dump.ps1 が書いた CSV）を tests/out/期待値.xlsx と突き合わせる
 使い方（tests フォルダで）：python compare_excel.py <CSV のフォルダ> [期待値.xlsx]
-  CSV：M_薬品.csv・T_月次.csv・T_判定理由.csv（excel_dump.ps1 の出力。UTF-8 BOM、日付 yyyy-MM-dd、真偽 True/False）
+  CSV：M_薬品.csv・T_月次.csv・T_判定理由.csv・T_ABC月次.csv（excel_dump.ps1 の出力。UTF-8 BOM、日付 yyyy-MM-dd、真偽 True/False）
   突き合わせ：キーで結び、数値は相対差 0.1%（絶対差 0.001）まで許容、文字・日付は完全一致
   ※ 実データは使わない。期待値は make_testdata.py の架空データから計算したもの
 """
@@ -14,7 +14,10 @@ M_COLS = {"出どころ": "出どころ", "予定日数": "予定日数", "平�
           "動いた月数": "動いた月数", "払出合計": "払出合計", "一日平均払出": "1日平均払出", "最後に動いた月": "最後に動いた月",
           "最終在庫": "最終在庫", "動きのない月数": "動きのない月数", "在庫日数": "在庫日数", "その他の減少": "その他の減少",
           "ずれの割合": "ずれの割合", "ずれの大きさ": "ずれの大きさ", "予定外の月数": "予定外の月数", "経過措置期限": "経過措置期限",
-          "直近の払出合計": "直近の払出合計", "直近の在庫日数": "直近の在庫日数"}
+          "直近の払出合計": "直近の払出合計", "直近の在庫日数": "直近の在庫日数",
+          "区分": "区分", "量の区分": "量の区分", "患者の最少月": "患者の最少月"}
+A_COLS = ["払出", "月平均払出", "量の区分", "患者の最少月", "区分", "前月の区分"]
+F_COLS = ["区分", "来週の予定", "来週の患者", "在庫", "不足", "発注の目安", "必要な最大在庫", "判定"]
 T_COLS = ["出納に載った", "払出数量", "予定数量", "予定とのずれ", "ずれの割合", "在庫数量", "その他の増減"]
 
 
@@ -125,6 +128,49 @@ def main():
         for c in T_COLS:
             if not same(r[c], g3[k][c]):
                 print(f"  {k} / {c}: 期待 {r[c]!r} ≠ Excel {g3[k][c]!r}"); bad += 1
+
+    # ---- T_ABC月次（月×まとまり） ----
+    p4 = os.path.join(folder, "T_ABC月次.csv")
+    if os.path.exists(p4) and "T_ABC月次" in exp.sheetnames:
+        g4 = {(month_key(r["月"]), r["需要のまとまり"]): r for r in read_csv(p4)}
+        e4 = rows_of(exp["T_ABC月次"])
+        print(f"T_ABC月次：Excel {len(g4)} 行、期待値 {len(e4)} 行")
+        for k in sorted({(month_key(r["月"]), r["需要のまとまり"]) for r in e4} - set(g4)):
+            print("  Excel にない行:", k); bad += 1
+        for k in sorted(set(g4) - {(month_key(r["月"]), r["需要のまとまり"]) for r in e4}):
+            print("  Excel にだけある行:", k); bad += 1
+        for r in e4:
+            k = (month_key(r["月"]), r["需要のまとまり"])
+            if k not in g4:
+                continue
+            for c in A_COLS:
+                if c not in g4[k]:
+                    print(f"  列がない: {c}"); bad += 1; continue
+                if not same(r[c], g4[k][c]):
+                    print(f"  {k} / {c}: 期待 {r[c]!r} ≠ Excel {g4[k][c]!r}"); bad += 1
+    else:
+        print("T_ABC月次：比べない（CSV か期待値のシートがない）")
+
+    # ---- R_発注書（期待値にある行だけ。ロット・出荷調整の注意だけで載る行は Excel 側にだけある） ----
+    p5 = os.path.join(folder, "R_発注書.csv")
+    if os.path.exists(p5) and "R_発注書" in exp.sheetnames:
+        g5 = {r["薬品名"]: r for r in read_csv(p5)}
+        e5 = rows_of(exp["R_発注書"])
+        print(f"R_発注書：Excel {len(g5)} 行、期待値 {len(e5)} 行（期待値にある行だけ比べる）")
+        for r in e5:
+            n = r["薬品名"]
+            if n not in g5:
+                print("  Excel にない行:", n); bad += 1; continue
+            for c in F_COLS:
+                if c not in g5[n]:
+                    print(f"  列がない: {c}"); bad += 1; continue
+                if not same(r[c], g5[n][c]):
+                    print(f"  {n} / {c}: 期待 {r[c]!r} ≠ Excel {g5[n][c]!r}"); bad += 1
+        extra = sorted(set(g5) - {r["薬品名"] for r in e5})
+        if extra:
+            print("  Excel にだけある行（注意だけで載った薬。誤りではない）:", "、".join(extra))
+    else:
+        print("R_発注書：比べない（CSV か期待値のシートがない）")
 
     print("違い:", bad)
     sys.exit(1 if bad else 0)
