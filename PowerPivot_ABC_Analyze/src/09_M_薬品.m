@@ -42,6 +42,14 @@
 //      まとまりの直近1日平均払出：同じ需要のまとまりの屋号すべての直近の1日平均払出の合計（未登録なら自分の値）
 //      切替の使い切り日数：旧品の在庫 ÷ まとまりの直近1日平均払出（切替先の需要で使い切る見込み）
 //      まとまり内で最多：同じ「需要のまとまり」（屋号が2つ以上）の中で、直近の払出が一番多い薬（E04 に使う）
+//    【発注の収束】同じ需要のまとまり（屋号が2つ以上）の発注を 1 つの薬に寄せる（0.9.0。F 発注書で使う）
+//      まとまりの品目数：同じ需要のまとまりに登録されている薬の数（未登録なら 1）
+//      発注先         ：まとまりの発注を寄せる薬。誰かの切替先になっている薬 → なければ 切替先なし・供給状況が通常（空欄）・
+//                       発注除外でない・経過措置でない薬のうち直近の払出が最多の薬 → それもなければ 切替先なしで直近の払出が最多の薬。
+//                       同点は薬品名順。まとまりの品目数が 1 なら空欄（自分だけ）
+//      まとまりのずれの割合：まとまり全体の 比較のずれ合計 の合計 ÷ 比較の予定合計 の合計（未登録なら自分の ずれの割合）。
+//                       切替で払出が旧品・予定が新品に分かれていても、まとまりとして正しく出る
+//      比較の予定合計 ：ずれの割合 の分母（出納と予定の両方がある月の予定の合計）。比較のずれ合計：その分子（払出 − 予定 の合計）
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -157,7 +165,7 @@ let
              動きのない月数 = if lastM = null then null
                               else (Date.Year(LatestM) - Date.Year(lastM)) * 12 + Date.Month(LatestM) - Date.Month(lastM),
              在庫日数 = if stock <> null and perDay <> null and perDay > 0 then stock / perDay else null,
-             比較月数 = Table.RowCount(both),
+             比較月数 = Table.RowCount(both), 比較の予定合計 = planSum, 比較のずれ合計 = gapSum,
              ずれの割合 = if planSum > 0 then gapSum / planSum else null,
              ずれの大きさ = if planSum > 0 then absSum / planSum else null,
              予定外の月数 = Table.RowCount(Table.SelectRows(both, each ([予定数量] ?? 0) = 0 and ([払出数量] ?? 0) > 0)),
@@ -203,7 +211,7 @@ let
     PlanCols = {"予定日数", "予定数量合計", "予定患者数合計", "最終予定日", "平均間隔", "ばらつき（CV²）", "需要の型", "1日平均予定"},
     SuiCols  = {"動いた月数", "払出合計", "払出のあった月数", "月平均払出", "1日平均払出", "仕入合計", "入庫の概算合計",
                 "その他の減少", "最後に動いた月", "最終在庫", "動きのない月数", "在庫日数",
-                "比較月数", "ずれの割合", "ずれの大きさ", "予定外の月数",
+                "比較月数", "比較の予定合計", "比較のずれ合計", "ずれの割合", "ずれの大きさ", "予定外の月数",
                 "直近の払出合計", "直近の1日平均払出", "直近の在庫日数"},
     E1 = Table.ExpandRecordColumn(Table.TransformColumns(J7, {{"予定", each _ ?? Record.FromList(List.Repeat({null}, List.Count(PlanCols)), PlanCols)}}), "予定", PlanCols),
     E2 = Table.ExpandRecordColumn(Table.TransformColumns(E1, {{"出納", each _ ?? Record.FromList(List.Repeat({null}, List.Count(SuiCols)), SuiCols)}}), "出納", SuiCols),
@@ -255,11 +263,35 @@ let
     F2 = Table.ExpandRecordColumn(Table.RemoveColumns(Fin, {"区分", "まとまりの直近1日平均払出"}), "f",
              {"製剤_表示", "区分_切替", "まとまり払出", "切替の使い切り日数", "経過措置", "発注除外", "出どころ", "まとまり内で最多", "不動品リスト"}),
 
-    Out = Table.SelectColumns(F2, {
+    // ---- 発注の収束（0.9.0）：まとまりの発注先と、まとまりのずれの割合 ----
+    //   候補の順：誰かの切替先 → 切替先なし・通常・発注除外でない・経過措置でない → 切替先なし。各候補の中で直近の払出が最多（同点は薬品名順）
+    PickTop = (t as table) as nullable text =>
+        if Table.IsEmpty(t) then null
+        else Table.First(Table.Sort(Table.TransformColumns(t, {{"直近の払出合計", each _ ?? 0, type number}}),
+                 {{"直近の払出合計", Order.Descending}, {"薬品名", Order.Ascending}}))[薬品名],
+    OrdG = Table.Group(Table.SelectRows(F2, each [需要のまとまり] <> null), {"需要のまとまり"}, {
+               {"まとまりの品目数", each Table.RowCount(_), Int64.Type},
+               {"発注先", each
+                   if Table.RowCount(_) < 2 then null
+                   else PickTop(Table.SelectRows(_, each [切替元] <> null))
+                     ?? PickTop(Table.SelectRows(_, each [切替先] = null and ([供給状況] = null or [供給状況] = "通常")
+                                                          and [発注除外] <> true and [経過措置] <> true))
+                     ?? PickTop(Table.SelectRows(_, each [切替先] = null)), type nullable text},
+               {"まとまりのずれの割合", each
+                   let w = List.Sum(List.Transform([比較の予定合計], (v) => v ?? 0)),
+                       g = List.Sum(List.Transform([比較のずれ合計], (v) => v ?? 0))
+                   in  if w > 0 then g / w else null, type nullable number}}),
+    F3 = Table.ExpandTableColumn(Table.NestedJoin(F2, {"需要のまとまり"}, OrdG, {"需要のまとまり"}, "o", JoinKind.LeftOuter), "o",
+             {"まとまりの品目数", "発注先", "まとまりのずれの割合"}),
+    F4 = Table.TransformColumns(F3, {{"まとまりの品目数", each _ ?? 1, Int64.Type}}),
+    F5 = Table.ReplaceValue(F4, each [まとまりのずれの割合], each if [需要のまとまり] = null then [ずれの割合] else [まとまりのずれの割合],
+             Replacer.ReplaceValue, {"まとまりのずれの割合"}),
+
+    Out = Table.SelectColumns(F5, {
               "薬品名", "略称", "製剤_表示", "単位", "棚番", "コード", "品名の先頭空白",
               "経過措置", "経過措置期限", "発注除外", "成分規格", "需要のまとまり", "先発後発",
               "列数", "出どころ", "供給状況", "区分_切替", "量の区分", "患者の最少月", "切替先", "切替元", "切替元の在庫",
-              "まとまり払出", "切替の使い切り日数"} & PlanCols & PatCols & SuiCols & {"まとまり内で最多",
+              "まとまり払出", "切替の使い切り日数", "まとまりの品目数", "発注先", "まとまりのずれの割合"} & PlanCols & PatCols & SuiCols & {"まとまり内で最多",
               "不動品リスト", "システム不動日数", "システム最終払出日", "システム在庫", "薬価", "YJコード"}),
     Ren = Table.RenameColumns(Out, {{"製剤_表示", "製剤"}, {"区分_切替", "区分"}, {"まとまり払出", "まとまりの直近1日平均払出"}}),
     Typed = Table.TransformColumnTypes(Ren, {
@@ -270,6 +302,7 @@ let
               {"区分", type text}, {"量の区分", type text}, {"患者の最少月", type number},
               {"切替先", type text}, {"切替元", type text}, {"切替元の在庫", type number},
               {"まとまりの直近1日平均払出", type number}, {"切替の使い切り日数", type number},
+              {"まとまりの品目数", Int64.Type}, {"発注先", type text}, {"まとまりのずれの割合", Percentage.Type},
               {"直近の月平均患者数", type number}, {"稼働四半期数", Int64.Type},
               {"予定日数", Int64.Type}, {"予定数量合計", type number}, {"予定患者数合計", type number},
               {"最終予定日", type date}, {"平均間隔", type number}, {"ばらつき（CV²）", type number},
@@ -278,7 +311,7 @@ let
               {"月平均払出", type number}, {"1日平均払出", type number}, {"仕入合計", type number},
               {"入庫の概算合計", type number}, {"その他の減少", type number}, {"最後に動いた月", type date},
               {"最終在庫", type number}, {"動きのない月数", Int64.Type}, {"在庫日数", type number},
-              {"比較月数", Int64.Type}, {"ずれの割合", Percentage.Type}, {"ずれの大きさ", Percentage.Type},
+              {"比較月数", Int64.Type}, {"比較の予定合計", type number}, {"比較のずれ合計", type number}, {"ずれの割合", Percentage.Type}, {"ずれの大きさ", Percentage.Type},
               {"予定外の月数", Int64.Type},
               {"供給状況", type text}, {"直近の払出合計", type number}, {"直近の1日平均払出", type number},
               {"直近の在庫日数", type number}, {"まとまり内で最多", type logical},

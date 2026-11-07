@@ -137,7 +137,8 @@ STOCK_BINS = [(0, 30, "～30日"), (30, 60, "30～60日"), (60, 90, "60～90日"
 
 
 def r5_order(model, settings):
-    """R5 発注書（㉔ R_発注書 と同じ定義）：来週の予定と在庫から発注の目安・判定・注意。区分 → 略称 → 薬品名"""
+    """R5 発注書（㉔ R_発注書 と同じ定義）：来週の予定と在庫から発注の目安・判定・注意。区分 → 略称 → 薬品名
+       0.9.0：同じ需要のまとまり（屋号が 2 つ以上）は予定・在庫を合算し、発注先（M_薬品）の 1 薬に寄せる"""
     import bisect
     from model import calendar
     S = settings
@@ -150,7 +151,21 @@ def r5_order(model, settings):
             last = g.sort_values("日付").iloc[-1]
             st = last["在庫量_発注残込み"] if not pd.isna(last["在庫量_発注残込み"]) else last["在庫量"]
             fcg[n] = (float(g["数量"].fillna(0).sum()), float(g["患者数"].fillna(0).sum()), None if pd.isna(st) else float(st))
-    # 納品と納品の間（翌営業日納品）に出る予定の最大
+    md = model.M_薬品
+    g_ = lambda r, k: (None if (k not in r.index or pd.isna(r[k])) else r[k])
+    key_of = {r["薬品名"]: (r["需要のまとまり"] if isinstance(g_(r, "発注先"), str) else r["薬品名"]) for _, r in md.iterrows()}
+    abbr_of = {r["薬品名"]: g_(r, "略称") for _, r in md.iterrows()}
+    # 薬ごとの在庫と、まとまりの合計
+    stock_of, plan_of, pats_of = {}, {}, {}
+    for _, r in md.iterrows():
+        n = r["薬品名"]
+        plan, pats, st = fcg.get(n, (0.0, 0.0, None))
+        stock_of[n] = st if st is not None else (g_(r, "最終在庫") or 0.0)
+        plan_of[n], pats_of[n] = plan, pats
+    g_plan, g_stock, g_pats = defaultdict(float), defaultdict(float), defaultdict(float)
+    for n, k in key_of.items():
+        g_plan[k] += plan_of[n]; g_stock[k] += stock_of[n]; g_pats[k] += pats_of[n]
+    # 納品と納品の間（翌営業日納品）に出る予定の最大（まとまりは合算）
     cal = calendar(S.start, S.end + dt.timedelta(days=14), S)
     biz = sorted(cal.loc[cal["卸の営業日"], "日付"])
     def next_biz(d):
@@ -159,11 +174,11 @@ def r5_order(model, settings):
     mx = {}
     day = model.T_日次
     if len(day):
-        day = day.assign(納品日=day["日付"].map(next_biz))
-        blk = day.groupby(["薬品名", "納品日"]).agg(量=("予定数量", lambda x: float(x.fillna(0).sum())), 始=("日付", "min"), 終=("日付", "max")).reset_index()
-        for n, g in blk.groupby("薬品名"):
+        day = day.assign(納品日=day["日付"].map(next_biz), キー=day["薬品名"].map(lambda n: key_of.get(n, n)))
+        blk = day.groupby(["キー", "納品日"]).agg(量=("予定数量", lambda x: float(x.fillna(0).sum())), 始=("日付", "min"), 終=("日付", "max")).reset_index()
+        for k, g in blk.groupby("キー"):
             r = g.sort_values(["量", "始"], ascending=[False, True]).iloc[0]
-            mx[n] = (float(r["量"]), r["始"], r["終"])
+            mx[k] = (float(r["量"]), r["始"], r["終"])
     # 注意の材料
     adj = getattr(model, "T_まとまり月次", None)
     adj_names = set()
@@ -176,23 +191,29 @@ def r5_order(model, settings):
         lot_names = set(lots.loc[((lots["残り日数"].notna()) & (lots["残り日数"] <= near)) | (lots["返す量"].fillna(0) > 0), "薬品名"])
     order_of = {"A": 1, "B": 2, "C": 3, "D": 4}
     rows = []
-    for _, r in model.M_薬品.iterrows():
+    for _, r in md.iterrows():
         n = r["薬品名"]
-        g = lambda k: (None if (k not in r.index or pd.isna(r[k])) else r[k])
-        plan, pats, st = fcg.get(n, (0.0, 0.0, None))
-        stock = st if st is not None else (g("最終在庫") or 0.0)
-        gap = g("ずれの割合") or 0.0
+        g = lambda k: g_(r, k)
+        tgt = g("発注先")
+        pooled = isinstance(tgt, str)
+        target = (not pooled) or tgt == n
+        k = key_of[n]
+        plan, pats, stock = plan_of[n], pats_of[n], stock_of[n]
+        gp = g_plan[k] if pooled else plan
+        gs = g_stock[k] if pooled else stock
+        gap = (g("まとまりのずれの割合") if pooled else g("ずれの割合")) or 0.0
         factor = max(0.0, 1 + gap)
-        exp = plan * factor
-        short = max(0.0, plan - stock)
-        mq = math.ceil(round((mx[n][0] if n in mx else 0.0) * factor, 6))
+        exp = gp * factor
+        short = max(0.0, gp - gs)
+        mq = math.ceil(round((mx[k][0] if k in mx else 0.0) * factor, 6))
         cls, sup = g("区分"), g("供給状況")
         excl = bool(r["発注除外"]); trans = bool(r["経過措置"])
         sw_to, sw_from = g("切替先"), g("切替元")
         no_order = excl or sup in ("供給停止", "薬価削除予定") or bool(sw_to)
-        careful = cls == "D" or trans or sup == "限定" or gap <= -gap_r or bool(sw_from)
-        oq = 0 if no_order else math.ceil(round(max(0.0, exp - stock), 6))
-        over = cls == "A" and mq > 0 and stock + oq > mq
+        careful = cls == "D" or trans or sup == "限定" or gap <= -gap_r or (bool(sw_from) and not pooled)
+        oq = 0 if (no_order or not target) else math.ceil(round(max(0.0, exp - gs), 6))
+        over = target and cls == "A" and mq > 0 and gs + oq > mq
+        grp_txt = f"予定 {fmt0(g_plan[k])}・在庫 {fmt0(g_stock[k])} を合算"
         notes = []
         if excl: notes.append("発注除外")
         if sup in ("供給停止", "薬価削除予定"): notes.append(sup)
@@ -203,21 +224,30 @@ def r5_order(model, settings):
         if cls == "D": notes.append("患者が少ない（区分 D）")
         if trans: notes.append("経過措置品（切替先があれば発注しない）")
         if r["出どころ"] == "出納だけ": notes.append("予定にない薬")
-        if sw_to: notes.append(f"切替元（「{sw_to}」へ寄せる。在庫を使い切る）")
-        if sw_from: notes.append(f"切替先（切替元の在庫 {fmt0(g('切替元の在庫'))} を使い切るまで控えめに）")
-        if over: notes.append(f"上限を超える（在庫＋目安 {fmt0(stock + oq)} ＞ {fmt0(mq)}）")
-        note = "、".join(notes)
-        verdict = "発注しない" if no_order else "控えめに" if (oq > 0 and careful) else "発注する" if oq > 0 else "不要"
-        if not (plan > 0 or short > 0 or note or cls == "A"):
+        if sw_to: notes.append("切替元（在庫を使い切る）" if pooled else f"切替元（「{sw_to}」へ寄せる。在庫を使い切る）")
+        if sw_from: notes.append("切替先（切替元の在庫は合算済み）" if pooled else f"切替先（切替元の在庫 {fmt0(g('切替元の在庫'))} を使い切るまで控えめに）")
+        if over: notes.append(f"上限を超える（在庫＋目安 {fmt0(gs + oq)} ＞ {fmt0(mq)}）")
+        pool_notes = [] if not pooled else (
+            [f"まとまり「{g('需要のまとまり')}」の発注先（{int(g('まとまりの品目数'))} 品目の {grp_txt}）"] if target
+            else [f"「{tgt}」に寄せる（まとまり「{g('需要のまとまり')}」：{grp_txt}）"])
+        note_other = "、".join(notes)
+        note = "、".join(pool_notes + notes)
+        verdict = ("寄せる" if (pooled and not target) else "発注しない" if no_order
+                   else "控えめに" if (oq > 0 and careful) else "発注する" if oq > 0 else "不要")
+        if not (gp > 0 or short > 0 or note_other or cls == "A"):
             continue
-        period = "" if n not in mx else f"{mx[n][1]:%Y/%m/%d}～{mx[n][2]:%Y/%m/%d}（{(mx[n][2] - mx[n][1]).days + 1}日）"
-        rows.append(dict(区分=cls, 略称=g("略称"), 薬品名=n, 来週の予定=plan, 来週の患者=pats, 在庫=stock, 不足=short, ずれ=gap,
-                         見込み=float(round(exp)), 発注の目安=oq, 必要な最大在庫=mq, 最大の期間=period, 判定=verdict, 注意=note,
-                         並び=order_of.get(cls, 5)))
-    cols = ["区分", "略称", "薬品名", "来週の予定", "来週の患者", "在庫", "不足", "ずれ", "見込み", "発注の目安", "必要な最大在庫", "最大の期間", "判定", "注意"]
+        period = "" if (k not in mx or not target) else f"{mx[k][1]:%Y/%m/%d}～{mx[k][2]:%Y/%m/%d}（{(mx[k][2] - mx[k][1]).days + 1}日）"
+        rows.append(dict(区分=cls, 略称=g("略称"), 薬品名=n, 来週の予定=plan, 来週の患者=pats, 在庫=stock,
+                         需要のまとまり=(g("需要のまとまり") if pooled else None),
+                         まとまりの予定=(g_plan[k] if pooled else None), まとまりの在庫=(g_stock[k] if pooled else None),
+                         不足=(short if target else None), ずれ=gap, 見込み=(float(round(exp)) if target else None), 発注の目安=oq,
+                         必要な最大在庫=(mq if target else None), 最大の期間=period, 判定=verdict, 注意=note,
+                         並び=order_of.get(cls, 5), 並び略=((abbr_of.get(tgt) if pooled else g("略称")) or ""), キー=k, 並び先=(0 if target else 1)))
+    cols = ["区分", "略称", "薬品名", "来週の予定", "来週の患者", "在庫", "需要のまとまり", "まとまりの予定", "まとまりの在庫",
+            "不足", "ずれ", "見込み", "発注の目安", "必要な最大在庫", "最大の期間", "判定", "注意"]
     if not rows:
         return pd.DataFrame(columns=cols)
-    df = pd.DataFrame(rows).sort_values(["並び", "略称", "薬品名"], na_position="first").reset_index(drop=True)
+    df = pd.DataFrame(rows).sort_values(["並び", "並び略", "キー", "並び先", "薬品名"]).reset_index(drop=True)
     return df[cols]
 
 

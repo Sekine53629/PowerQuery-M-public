@@ -1,7 +1,7 @@
 // ================================================================================
 // ㉔ クエリ名：R_発注書（シート「F_発注書」に表として読み込む）
 //    F 発注書（来週の分）：薬ごとに、来週（予測開始～予測終了）の予定と在庫から発注の目安を出し、
-//    発注してよいか（発注する／控えめに／発注しない／不要）と注意を付ける。区分 → 略称 → 薬品名 の順に並ぶ
+//    発注してよいか（発注する／控えめに／発注しない／寄せる／不要）と注意を付ける。区分 → 略称 → 薬品名 の順に並ぶ
 //    ・来週の予定・来週の患者：薬品使用量予測データ（設定「予測フォルダパス」。空欄なら実績フォルダ）の
 //        予測開始（発注日の翌日）～予測終了（予測開始 ＋ 予測日数 − 1）の 予定使用量・患者数 の合計。
 //        当月の予測データには月末までの予定が入っている。週が翌月にかかるときは翌月のファイルも置く
@@ -11,12 +11,22 @@
 //    ・必要な最大在庫：1 年の日次の予定を「納品と納品の間」（注文は翌営業日に届くとして、同じ次の納品日を持つ日々）で
 //        区切った合計のいちばん大きいもの × (1 ＋ ずれ)。連休でも不足しない在庫の上限の目安（区分 A の薬の管理用）。
 //        卸の営業日は ④ fx_卸の休み（土日・祝日・年末年始・追加休業日）
+//    【発注の収束】（0.9.0）同じ需要のまとまり（薬品グループ。屋号が 2 つ以上）の薬は、需要と在庫をまとまりで合算し、
+//        発注を M_薬品 の「発注先」（切替先 → なければ通常供給で直近の払出が最多の屋号）の 1 薬に寄せる
+//        ・まとまりの予定・まとまりの在庫：まとまり全体の 来週の予定・在庫 の合計（屋号ごとの値は 来週の予定・在庫 の列のまま）
+//        ・見込み・不足・発注の目安・必要な最大在庫 は まとまりの合計 で計算し、発注先の行にだけ出す。ずれ は まとまりのずれの割合
+//        ・発注先でない屋号は 判定「寄せる」（目安 0）。注意に「「発注先」に寄せる」と出る。在庫は使い切る
+//        ・まとまりに登録のない薬、屋号が 1 つだけのまとまりは、これまでどおり薬ごとに計算する
 //    ・判定：発注しない ＝ 発注除外／供給状況が 供給停止・薬価削除予定／切替元（薬品グループの 切替先 あり。0.7.0）（目安は 0）
-//            控えめに   ＝ 区分 D／経過措置品／供給状況 限定／予定より「ずれの注意割合」以上少なく出る薬／切替先で、目安 > 0
+//            寄せる     ＝ まとまりの発注先でない屋号（0.9.0）（目安は 0）
+//            控えめに   ＝ 区分 D／経過措置品／供給状況 限定／予定より「ずれの注意割合」以上少なく出る薬／
+//                         切替先（まとまりで合算していないとき）で、目安 > 0
 //            発注する   ＝ それ以外で目安 > 0　　不要 ＝ 目安 0
 //    ・注意：限定出荷／出荷調整の疑い（⑬ G01・G02）／期限の近いロットを先に使う（⑭ 残り日数 ≦ 期限切迫の日数 か 返す量 > 0）／
-//            予定より n% 少なく出る／患者が少ない（区分 D）／経過措置品／予定にない薬／上限を超える（区分 A で 在庫＋目安 > 必要な最大在庫）
-//    ・載せる薬：来週の予定か不足があるか、注意があるか、区分 A（上限の確認のため常に載せる）。在庫が足りて注意もない薬は載せない
+//            予定より n% 少なく出る／患者が少ない（区分 D）／経過措置品／予定にない薬／上限を超える（区分 A で 在庫＋目安 > 必要な最大在庫）／
+//            まとまりの発注先（n 品目を合算）／「X」に寄せる
+//    ・載せる薬：来週の予定か不足があるか（まとまりならその合計で見る）、注意（寄せる関係の注意を除く）があるか、
+//        区分 A（上限の確認のため常に載せる）。在庫が足りて注意もない薬は載せない。まとまりは発注先と屋号の行が並ぶ
 //    ・区分の列でオートフィルターをかければ、区分ごとに印刷できる
 // ================================================================================
 let
@@ -39,7 +49,25 @@ let
                    {"来週の患者", each List.Sum([患者数]) ?? 0, type number},
                    {"在庫_予測",  each let r = Table.Max(_, "日付") in r[在庫量_発注残込み] ?? r[在庫量], type nullable number}}),
 
-    // ---- 必要な最大在庫：納品と納品の間に出る予定の最大（1 年） ----
+    // ---- 薬ごとの材料：まとまりキー（発注先のあるまとまりは需要のまとまり、それ以外は薬品名）と在庫 ----
+    Drugs = #"M_薬品",
+    K0 = Table.AddColumn(Drugs, "まとまりキー", each if [発注先] <> null then [需要のまとまり] else [薬品名], type text),
+    J1 = Table.ExpandTableColumn(Table.NestedJoin(K0, {"薬品名"}, FcG, {"薬品名"}, "f", JoinKind.LeftOuter), "f",
+             {"来週の予定", "来週の患者", "在庫_予測"}),
+    J1s = Table.AddColumn(J1, "在庫_薬", each [在庫_予測] ?? [最終在庫] ?? 0, type number),
+    Abbr = Table.Buffer(Table.SelectColumns(Drugs, {"薬品名", "略称"})),
+    AbbrOf = (n as nullable text) as nullable text =>
+                 if n = null then null else try Abbr{[薬品名 = n]}[略称] otherwise null,
+
+    // ---- まとまりの合計（来週の予定・患者・在庫） ----
+    Grp = Table.Group(J1s, {"まとまりキー"}, {
+              {"まとまりの予定", each List.Sum(List.Transform([来週の予定], (v) => v ?? 0)), type number},
+              {"まとまりの患者", each List.Sum(List.Transform([来週の患者], (v) => v ?? 0)), type number},
+              {"まとまりの在庫", each List.Sum([在庫_薬]), type number}}),
+    J1g = Table.ExpandTableColumn(Table.NestedJoin(J1s, {"まとまりキー"}, Grp, {"まとまりキー"}, "g", JoinKind.LeftOuter), "g",
+              {"まとまりの予定", "まとまりの患者", "まとまりの在庫"}),
+
+    // ---- 必要な最大在庫：納品と納品の間に出る予定の最大（1 年。まとまりは合算） ----
     S0     = Date.From(Prm[開始日]),
     E0     = Date.From(Prm[終了日]),
     Cal    = #"fx_卸の休み"(S0, Date.AddDays(E0, 14)),
@@ -48,13 +76,17 @@ let
     Dates  = List.Dates(S0, Duration.Days(E0 - S0) + 1, #duration(1, 0, 0, 0)),
     Blocks = Table.Buffer(Table.FromColumns({Dates, List.Transform(Dates, NextBiz)},
                  type table [日付 = date, 納品日 = nullable date])),
+    KeyMap = Table.Buffer(Table.SelectColumns(K0, {"薬品名", "まとまりキー"})),
+    DayK   = Table.ExpandTableColumn(
+                 Table.NestedJoin(#"T_日次", {"薬品名"}, KeyMap, {"薬品名"}, "k", JoinKind.LeftOuter), "k", {"まとまりキー"}),
+    DayK2  = Table.ReplaceValue(DayK, null, each [薬品名], Replacer.ReplaceValue, {"まとまりキー"}),
     DayB   = Table.ExpandTableColumn(
-                 Table.NestedJoin(#"T_日次", {"日付"}, Blocks, {"日付"}, "b", JoinKind.LeftOuter), "b", {"納品日"}),
-    PerBlk = Table.Group(DayB, {"薬品名", "納品日"}, {
+                 Table.NestedJoin(DayK2, {"日付"}, Blocks, {"日付"}, "b", JoinKind.LeftOuter), "b", {"納品日"}),
+    PerBlk = Table.Group(DayB, {"まとまりキー", "納品日"}, {
                  {"量", each List.Sum([予定数量]) ?? 0, type number},
                  {"始", each List.Min([日付]), type date},
                  {"終", each List.Max([日付]), type date}}),
-    MaxBlk = Table.Group(PerBlk, {"薬品名"}, {{"r", each
+    MaxBlk = Table.Group(PerBlk, {"まとまりキー"}, {{"r", each
                  Table.First(Table.Sort(_, {{"量", Order.Descending}, {"始", Order.Ascending}})), type record}}),
     MaxE   = Table.ExpandRecordColumn(MaxBlk, "r", {"量", "始", "終"}, {"最大の期間の量", "期間始", "期間終"}),
 
@@ -67,28 +99,30 @@ let
                    ([残り日数] <> null and [残り日数] <= Near) or ([返す量] ?? 0) > 0)[薬品名])),
 
     // ---- 薬ごとの計算 ----
-    Drugs = #"M_薬品",
-    J1 = Table.ExpandTableColumn(Table.NestedJoin(Drugs, {"薬品名"}, FcG, {"薬品名"}, "f", JoinKind.LeftOuter), "f",
-             {"来週の予定", "来週の患者", "在庫_予測"}),
-    J2 = Table.ExpandTableColumn(Table.NestedJoin(J1, {"薬品名"}, MaxE, {"薬品名"}, "m", JoinKind.LeftOuter), "m",
+    J2 = Table.ExpandTableColumn(Table.NestedJoin(J1g, {"まとまりキー"}, MaxE, {"まとまりキー"}, "m", JoinKind.LeftOuter), "m",
              {"最大の期間の量", "期間始", "期間終"}),
     Calc = Table.AddColumn(J2, "計算", (r) =>
         let
+            pooled  = r[発注先] <> null,                       // まとまりで合算する薬（屋号が 2 つ以上）
+            target  = not pooled or r[発注先] = r[薬品名],      // 発注の目安を出す行
             plan    = r[来週の予定] ?? 0,
             pats    = r[来週の患者] ?? 0,
-            stock   = r[在庫_予測] ?? r[最終在庫] ?? 0,
-            gap     = r[ずれの割合] ?? 0,
+            stock   = r[在庫_薬],
+            gPlan   = if pooled then r[まとまりの予定] else plan,
+            gStock  = if pooled then r[まとまりの在庫] else stock,
+            gap     = (if pooled then r[まとまりのずれの割合] else r[ずれの割合]) ?? 0,
             factor  = List.Max({0, 1 + gap}),
-            exp     = plan * factor,
-            short   = List.Max({0, plan - stock}),
+            exp     = gPlan * factor,
+            short   = List.Max({0, gPlan - gStock}),
             maxQ    = Number.RoundUp(Number.Round((r[最大の期間の量] ?? 0) * factor, 6)),
             cls     = r[区分],
             sup     = r[供給状況],
             excl    = r[発注除外] = true,
             noOrder = excl or sup = "供給停止" or sup = "薬価削除予定" or r[切替先] <> null,
-            careful = cls = "D" or r[経過措置] = true or sup = "限定" or gap <= -GapRate or r[切替元] <> null,
-            oq      = if noOrder then 0 else Number.RoundUp(Number.Round(List.Max({0, exp - stock}), 6)),
-            overCap = cls = "A" and maxQ > 0 and stock + oq > maxQ,
+            careful = cls = "D" or r[経過措置] = true or sup = "限定" or gap <= -GapRate or (r[切替元] <> null and not pooled),
+            oq      = if noOrder or not target then 0 else Number.RoundUp(Number.Round(List.Max({0, exp - gStock}), 6)),
+            overCap = target and cls = "A" and maxQ > 0 and gStock + oq > maxQ,
+            grpTxt  = "予定 " & F(r[まとまりの予定]) & "・在庫 " & F(r[まとまりの在庫]) & " を合算",
             notes   = List.RemoveNulls({
                           if excl then "発注除外" else null,
                           if sup = "供給停止" or sup = "薬価削除予定" then sup else null,
@@ -99,33 +133,58 @@ let
                           if cls = "D" then "患者が少ない（区分 D）" else null,
                           if r[経過措置] = true then "経過措置品（切替先があれば発注しない）" else null,
                           if r[出どころ] = "出納だけ" then "予定にない薬" else null,
-                          if r[切替先] <> null then "切替元（「" & r[切替先] & "」へ寄せる。在庫を使い切る）" else null,
-                          if r[切替元] <> null then "切替先（切替元の在庫 " & F(r[切替元の在庫]) & " を使い切るまで控えめに）" else null,
-                          if overCap then "上限を超える（在庫＋目安 " & F(stock + oq) & " ＞ " & F(maxQ) & "）" else null}),
-            note    = Text.Combine(notes, "、"),
-            verdict = if noOrder then "発注しない"
+                          if r[切替先] <> null then (if pooled then "切替元（在庫を使い切る）" else "切替元（「" & r[切替先] & "」へ寄せる。在庫を使い切る）") else null,
+                          if r[切替元] <> null then (if pooled then "切替先（切替元の在庫は合算済み）"
+                                                     else "切替先（切替元の在庫 " & F(r[切替元の在庫]) & " を使い切るまで控えめに）") else null,
+                          if overCap then "上限を超える（在庫＋目安 " & F(gStock + oq) & " ＞ " & F(maxQ) & "）" else null}),
+            poolNotes = if not pooled then {}
+                        else if target then {"まとまり「" & r[需要のまとまり] & "」の発注先（" & Text.From(r[まとまりの品目数]) & " 品目の " & grpTxt & "）"}
+                        else {"「" & r[発注先] & "」に寄せる（まとまり「" & r[需要のまとまり] & "」：" & grpTxt & "）"},
+            noteOther = Text.Combine(notes, "、"),
+            note    = Text.Combine(poolNotes & notes, "、"),
+            verdict = if pooled and not target then "寄せる"
+                      else if noOrder then "発注しない"
                       else if oq > 0 and careful then "控えめに"
                       else if oq > 0 then "発注する" else "不要",
             period  = if r[期間始] = null then ""
                       else Date.ToText(r[期間始], "yyyy/MM/dd") & "～" & Date.ToText(r[期間終], "yyyy/MM/dd")
                            & "（" & Text.From(Duration.Days(r[期間終] - r[期間始]) + 1) & "日）",
-            order   = if cls = "A" then 1 else if cls = "B" then 2 else if cls = "C" then 3 else if cls = "D" then 4 else 5
+            order   = if cls = "A" then 1 else if cls = "B" then 2 else if cls = "C" then 3 else if cls = "D" then 4 else 5,
+            sortAb  = (if pooled then AbbrOf(r[発注先]) else r[略称]) ?? ""
         in
-            [来週の予定 = plan, 来週の患者 = pats, 在庫 = stock, 不足 = short, ずれ = gap, 見込み = Number.Round(exp, 0),
-             発注の目安 = oq, 必要な最大在庫 = maxQ, 最大の期間 = period, 判定 = verdict, 注意 = note,
-             載せる = plan > 0 or short > 0 or note <> "" or cls = "A", 並び = order]),
+            [来週の予定 = plan, 来週の患者 = pats, 在庫 = stock,
+             需要のまとまり_表示 = if pooled then r[需要のまとまり] else null,
+             まとまりの予定_表示 = if pooled then r[まとまりの予定] else null,
+             まとまりの在庫_表示 = if pooled then r[まとまりの在庫] else null,
+             不足 = if target then short else null, ずれ = gap,
+             見込み = if target then Number.Round(exp, 0) else null,
+             発注の目安 = oq,
+             必要な最大在庫 = if target then maxQ else null,
+             最大の期間 = if target then period else "",
+             判定 = verdict, 注意 = note,
+             載せる = gPlan > 0 or short > 0 or noteOther <> "" or cls = "A",
+             並び = order, 並び略 = sortAb, 並び先 = if target then 0 else 1]),
     // 計算の中の 来週の予定・来週の患者 は J1 の列と同じ名前なので、先に外してから広げる
-    E    = Table.ExpandRecordColumn(Table.RemoveColumns(Calc, {"来週の予定", "来週の患者", "在庫_予測"}), "計算",
-               {"来週の予定", "来週の患者", "在庫", "不足", "ずれ", "見込み", "発注の目安", "必要な最大在庫", "最大の期間", "判定", "注意", "載せる", "並び"}),
+    E    = Table.ExpandRecordColumn(Table.RemoveColumns(Calc, {"来週の予定", "来週の患者", "在庫_予測", "在庫_薬",
+               "まとまりの予定", "まとまりの患者", "まとまりの在庫"}), "計算",
+               {"来週の予定", "来週の患者", "在庫", "需要のまとまり_表示", "まとまりの予定_表示", "まとまりの在庫_表示", "不足", "ずれ", "見込み",
+                "発注の目安", "必要な最大在庫", "最大の期間", "判定", "注意", "載せる", "並び", "並び略", "並び先"}),
     Sel  = Table.SelectRows(E, each [載せる]),
-    Out  = Table.SelectColumns(Sel, {"区分", "略称", "薬品名", "来週の予定", "来週の患者", "在庫", "不足", "ずれ", "見込み",
-               "発注の目安", "必要な最大在庫", "最大の期間", "判定", "注意", "並び"}),
-    Typed = Table.TransformColumnTypes(Out, {
+    Out  = Table.SelectColumns(Sel, {"区分", "略称", "薬品名", "来週の予定", "来週の患者", "在庫",
+               "需要のまとまり_表示", "まとまりの予定_表示", "まとまりの在庫_表示", "不足", "ずれ", "見込み",
+               "発注の目安", "必要な最大在庫", "最大の期間", "判定", "注意", "まとまりキー", "並び", "並び略", "並び先"}),
+    Ren  = Table.RenameColumns(Out, {{"需要のまとまり_表示", "需要のまとまり"}, {"まとまりの予定_表示", "まとまりの予定"},
+               {"まとまりの在庫_表示", "まとまりの在庫"}}),
+    Typed = Table.TransformColumnTypes(Ren, {
                {"区分", type text}, {"略称", type text}, {"薬品名", type text}, {"来週の予定", type number},
-               {"来週の患者", type number}, {"在庫", type number}, {"不足", type number}, {"ずれ", Percentage.Type},
+               {"来週の患者", type number}, {"在庫", type number}, {"需要のまとまり", type text},
+               {"まとまりの予定", type number}, {"まとまりの在庫", type number},
+               {"不足", type number}, {"ずれ", Percentage.Type},
                {"見込み", type number}, {"発注の目安", type number}, {"必要な最大在庫", type number},
-               {"最大の期間", type text}, {"判定", type text}, {"注意", type text}, {"並び", Int64.Type}}),
-    Sorted = Table.Sort(Typed, {{"並び", Order.Ascending}, {"略称", Order.Ascending}, {"薬品名", Order.Ascending}}),
-    Result = Table.RemoveColumns(Sorted, {"並び"})
+               {"最大の期間", type text}, {"判定", type text}, {"注意", type text},
+               {"まとまりキー", type text}, {"並び", Int64.Type}, {"並び略", type text}, {"並び先", Int64.Type}}),
+    Sorted = Table.Sort(Typed, {{"並び", Order.Ascending}, {"並び略", Order.Ascending}, {"まとまりキー", Order.Ascending},
+               {"並び先", Order.Ascending}, {"薬品名", Order.Ascending}}),
+    Result = Table.RemoveColumns(Sorted, {"まとまりキー", "並び", "並び略", "並び先"})
 in
     Result

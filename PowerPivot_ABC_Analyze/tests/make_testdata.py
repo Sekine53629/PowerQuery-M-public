@@ -37,7 +37,10 @@ FC_DAYS = 7                                               # 設定「予測日�
 GROUP_ROWS = [  # 薬品名, 成分規格, 需要のまとまり, 先発後発, 供給状況, 切替先
     ("アリピプラゾール錠3mg(旧)", "アリピプラゾール錠3mg", "アリピプラゾール 3mg", "後発", None, "アリピプラゾール錠3mg"),
     ("アリピプラゾール錠3mg", "アリピプラゾール錠3mg", "アリピプラゾール 3mg", "後発", None, None),
+    ("セルトラリン錠25mg「アメル」", "セルトラリン錠25mg", "セルトラリン 25mg", "後発", "通常", None),
+    ("セルトラリン錠25mg「トーワ」", "セルトラリン錠25mg", "セルトラリン 25mg", "後発", None, None),
 ]
+SUPPLY_OF = {r[0]: r[4] for r in GROUP_ROWS}             # 薬品名 → 供給状況（手入力）
 GROUP_OF = {r[0]: r[2] for r in GROUP_ROWS}             # 薬品名（正規化後） → 需要のまとまり
 SWITCH_TO = {r[0]: r[5] for r in GROUP_ROWS if r[5]}    # 切替元 → 切替先
 # 卸の休み（④ と同じ：土日・祝日・年末年始）。2026 年 4～10 月の祝日を固定で列挙（振替休日・国民の休日を含む）
@@ -52,6 +55,7 @@ WD = "月火水木金土日"
 DRUGS = [
     ("デエビゴ錠2.5mg",            "ﾃﾞｴﾋﾞｺﾞ2.5", "regular",  28, 0.95, 1.00, 0.10),
     ("セルトラリン錠25mg「アメル」", "ｾﾙﾄﾗﾘﾝ25",   "regular",  14, 0.80, 1.05, 0.15),
+    ("セルトラリン錠25mg「トーワ」", "ｾﾙﾄﾗﾄﾜ25",   "regular",  14, 0.35, 1.00, 0.10),
     ("エスシタロプラム錠10mg",       "ｴｽｼﾀﾛ10",    "regular",  28, 0.60, 1.00, 0.05),
     ("タンドスピロン錠10mg「サワイ」", "ﾀﾝﾄﾞｽﾋﾟﾛﾝ10", "regular", 42, 0.30, 1.40, 0.20),
     ("ビペリデン錠1mg",              "ﾋﾞﾍﾟﾘﾃﾞﾝ1",  "sparse",   28, 0.08, 1.00, 0.05),
@@ -475,6 +479,7 @@ def expected(days, plan, mon, info, plan_name, fudo, fc):
         return x
 
     t_mon, m_drug, reasons, orders = [], [], [], []
+    fmat = {}                                        # 薬品名 → F の材料
     for name in names:
         rows = []
         for m in months:
@@ -542,26 +547,16 @@ def expected(days, plan, mon, info, plan_name, fudo, fc):
         if cls_d == "D" and src != "出納だけ" and not sw_to: codes.append("D06")
         if sw_to: codes.append("E05")
         if name in sw_from: codes.append("E06")
-        # ---- 発注書 F（㉔）：注意のうち、ロット・出荷調整によるものは期待値では見ない（行の有無もそれに依存する分は Excel 側だけ）----
+        # ---- 発注書 F（㉔）の材料：まとまりの合算と発注先はループのあとで決める（0.9.0）----
+        #   注意のうち、ロット・出荷調整によるものは期待値では見ない（行の有無もそれに依存する分は Excel 側だけ）
         fcd = fc_by.get(name, {})
-        plan7 = sum(v[0] for v in fcd.values()); pats7 = sum(v[1] for v in fcd.values())
-        stock_f = fcd[max(fcd)][2] if fcd else (stock if stock is not None else 0)
-        gap_v = d["ずれの割合"] or 0
-        factor = max(0, 1 + gap_v)
         blocks = defaultdict(float)
         for dd, (q, p) in tday.get(name, {}).items():
             blocks[next_biz(dd)] += q
-        max_q = math.ceil(round(max(blocks.values(), default=0) * factor, 6))
-        cls = cls_d
-        no_order = bool(sw_to)                           # 発注除外・供給停止はテストデータにない。切替元は発注しない
-        careful = cls == "D" or trans is not None or gap_v <= -TH["ずれの注意割合"] or name in sw_from
-        oq = 0 if no_order else math.ceil(round(max(0, plan7 * factor - stock_f), 6))
-        over = cls == "A" and max_q > 0 and stock_f + oq > max_q
-        note_det = (gap_v <= -TH["ずれの注意割合"]) or cls == "D" or trans is not None or src == "出納だけ" or over or sw_to or (name in sw_from)
-        verdict = "発注しない" if no_order else "控えめに" if (oq > 0 and careful) else "発注する" if oq > 0 else "不要"
-        if plan7 > 0 or max(0, plan7 - stock_f) > 0 or note_det or cls == "A":
-            orders.append(dict(薬品名=name, 区分=cls, 来週の予定=plan7, 来週の患者=pats7, 在庫=stock_f, 不足=max(0, plan7 - stock_f),
-                               発注の目安=oq, 必要な最大在庫=max_q, 判定=verdict))
+        fmat[name] = dict(plan7=sum(v[0] for v in fcd.values()), pats7=sum(v[1] for v in fcd.values()),
+                          stock_f=(fcd[max(fcd)][2] if fcd else (stock if stock is not None else 0)),
+                          gap_own=d["ずれの割合"], plan_sum=plan_sum, gap_sum=gap_sum, blocks=blocks, cls=cls_d, trans=trans, src=src,
+                          sw_to=sw_to, is_sw_from=(name in sw_from), rec_out=rec_out)
         gr, gs = d["ずれの割合"], d["ずれの大きさ"]
         if gr is not None and gr >= TH["ずれの注意割合"]: codes.append("P01")
         if gr is not None and gr <= -TH["ずれの注意割合"]: codes.append("P02")
@@ -570,6 +565,57 @@ def expected(days, plan, mon, info, plan_name, fudo, fc):
         if src == "出納だけ": codes.append("Q01")
         if src == "予定だけ": codes.append("Q02")
         reasons += [dict(薬品名=name, コード=c) for c in codes]
+    # ---- 発注の収束（0.9.0）：まとまり（屋号 2 つ以上）の発注先（⑨ と同じ決まり）----
+    members = defaultdict(list)
+    for name in fmat:
+        if name in GROUP_OF:
+            members[GROUP_OF[name]].append(name)
+
+    def pick(cands):
+        return sorted(cands, key=lambda n: (-fmat[n]["rec_out"], n))[0] if cands else None
+    target_of = {}
+    for gname, mem in members.items():
+        if len(mem) < 2:
+            continue
+        t = (pick([n for n in mem if fmat[n]["is_sw_from"]])
+             or pick([n for n in mem if not fmat[n]["sw_to"] and SUPPLY_OF.get(n) in (None, "通常") and fmat[n]["trans"] is None])
+             or pick([n for n in mem if not fmat[n]["sw_to"]]))
+        if t:
+            for n in mem:
+                target_of[n] = t
+    for d in m_drug:
+        d["発注先"] = target_of.get(d["薬品名"])
+    # ---- 発注書 F（㉔）：まとまりは予定・在庫を合算し、発注先の行に目安を出す。ほかの屋号は「寄せる」----
+    for name, f in fmat.items():
+        tgt = target_of.get(name)
+        pooled = tgt is not None
+        is_t = (not pooled) or tgt == name
+        mem = members[GROUP_OF[name]] if pooled else [name]
+        g_plan = sum(fmat[n]["plan7"] for n in mem); g_stock = sum(fmat[n]["stock_f"] for n in mem)
+        if pooled:
+            w = sum(fmat[n]["plan_sum"] for n in mem)
+            gap_v = (sum(fmat[n]["gap_sum"] for n in mem) / w) if w > 0 else 0
+        else:
+            gap_v = f["gap_own"] or 0
+        factor = max(0, 1 + gap_v)
+        blocks = defaultdict(float)
+        for n in mem:
+            for k, v in fmat[n]["blocks"].items():
+                blocks[k] += v
+        max_q = math.ceil(round(max(blocks.values(), default=0) * factor, 6))
+        cls, trans, src, sw_to = f["cls"], f["trans"], f["src"], f["sw_to"]
+        no_order = bool(sw_to)                           # 発注除外・供給停止はテストデータにない。切替元は発注しない
+        careful = cls == "D" or trans is not None or gap_v <= -TH["ずれの注意割合"] or (f["is_sw_from"] and not pooled)
+        oq = 0 if (no_order or not is_t) else math.ceil(round(max(0, g_plan * factor - g_stock), 6))
+        over = is_t and cls == "A" and max_q > 0 and g_stock + oq > max_q
+        note_det = (gap_v <= -TH["ずれの注意割合"]) or cls == "D" or trans is not None or src == "出納だけ" or over or sw_to or f["is_sw_from"]
+        verdict = ("寄せる" if (pooled and not is_t) else "発注しない" if no_order
+                   else "控えめに" if (oq > 0 and careful) else "発注する" if oq > 0 else "不要")
+        short = max(0, g_plan - g_stock)
+        if g_plan > 0 or short > 0 or note_det or cls == "A":
+            orders.append(dict(薬品名=name, 区分=cls, 来週の予定=f["plan7"], 来週の患者=f["pats7"], 在庫=f["stock_f"],
+                               まとまりの予定=(g_plan if pooled else None), まとまりの在庫=(g_stock if pooled else None),
+                               不足=(short if is_t else None), 発注の目安=oq, 必要な最大在庫=(max_q if is_t else None), 判定=verdict))
     wb = Workbook(); wb.remove(wb.active)
     for title, data in (("T_月次", t_mon), ("M_薬品", m_drug), ("T_判定理由", reasons), ("T_ABC月次", abc_rows), ("R_発注書", orders)):
         ws = wb.create_sheet(title)
@@ -582,7 +628,8 @@ def expected(days, plan, mon, info, plan_name, fudo, fc):
               "・T_月次：その月に出納に載ったか予定があった薬の行だけ（動きも予定もない月は行なし。⑦ と同じ）",
               "・M_薬品：列名の「一日」「CV2」は、Excel では「1日」「ばらつき（CV²）」",
               "・T_ABC月次：まとまり＝薬品名。ただしアリピプラゾール錠3mg(旧)（予定）と アリピプラゾール錠3mg（出納）は薬品グループで同じまとまり「アリピプラゾール 3mg」（(旧) が切替元）。量の区分は月平均払出の線 1000／300、区分 D は窓の各月の予定患者数の最少が 2 未満",
-              "・R_発注書：来週＝10/2～10/8 の予測（202610 のファイル）。期待値にある行だけ比べる（ロット・出荷調整の注意だけで載る行は Excel 側だけ）",
+              "・R_発注書：来週＝10/2～10/8 の予測（202610 のファイル）。期待値にある行だけ比べる（ロット・出荷調整の注意だけで載る行は Excel 側だけ）。"
+              "まとまり（アリピプラゾール 3mg、セルトラリン 25mg）は予定・在庫を合算し、発注先（切替先 → 通常供給で直近の払出が最多）の行に目安、ほかは「寄せる」（0.9.0）",
               "・祝日は無視して月～土を営業日にしている（テストデータの作り方の都合）",
               "・アリピプラゾールは実績の名前を「（旧）」付きにして、出納とずらしてある（Q01・Q02 の確認用）",
               "・スルピリドは全角の「５０ｍｇ」。fx_正規化 で半角になり、出納と一致すれば正しい"]:

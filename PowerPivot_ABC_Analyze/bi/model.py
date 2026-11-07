@@ -923,14 +923,14 @@ class Model:
                                最後に動いた月=(last["月"] if last is not None else None), 最終在庫=stock_v,
                                動きのない月数=(months_between(last["月"], latest_m) if last is not None else None),
                                在庫日数=((stock_v / per_day) if (stock_v is not None and per_day) else None),
-                               比較月数=int(len(both)), ずれの割合=((gap_sum / plan_sum) if plan_sum > 0 else None),
+                               比較月数=int(len(both)), 比較の予定合計=plan_sum, 比較のずれ合計=gap_sum, ずれの割合=((gap_sum / plan_sum) if plan_sum > 0 else None),
                                ずれの大きさ=((abs_sum / plan_sum) if plan_sum > 0 else None),
                                予定外の月数=int(((both["予定数量"].fillna(0) == 0) & (both["払出数量"].fillna(0) > 0)).sum()),
                                直近の払出合計=rec_out, 直近の1日平均払出=rec_per_day,
                                直近の在庫日数=((stock_v / rec_per_day) if (stock_v is not None and rec_per_day) else None))
         plan_cols = ["予定日数", "予定数量合計", "予定患者数合計", "最終予定日", "平均間隔", "ばらつき（CV²）", "需要の型", "1日平均予定"]
         sui_cols = ["動いた月数", "払出合計", "払出のあった月数", "月平均払出", "1日平均払出", "仕入合計", "入庫の概算合計", "その他の減少",
-                    "最後に動いた月", "最終在庫", "動きのない月数", "在庫日数", "比較月数", "ずれの割合", "ずれの大きさ", "予定外の月数",
+                    "最後に動いた月", "最終在庫", "動きのない月数", "在庫日数", "比較月数", "比較の予定合計", "比較のずれ合計", "ずれの割合", "ずれの大きさ", "予定外の月数",
                     "直近の払出合計", "直近の1日平均払出", "直近の在庫日数"]
         recs = []
         tr_map = dict(zip(trans["薬品名"], trans["経過措置期限"]))
@@ -984,6 +984,32 @@ class Model:
             for c in sui_cols:
                 r[c] = m.get(c)
             recs.append(r)
+        # 発注の収束（0.9.0）：まとまりの品目数・発注先・まとまりのずれの割合（⑨ と同じ決まり）
+        by_g = {}
+        for r in recs:
+            if isinstance(r["需要のまとまり"], str):
+                by_g.setdefault(r["需要のまとまり"], []).append(r)
+
+        def pick(rows):
+            if not rows:
+                return None
+            return sorted(rows, key=lambda x: (-(x.get("直近の払出合計") or 0), x["薬品名"]))[0]["薬品名"]
+        for r in recs:
+            g0 = r["需要のまとまり"] if isinstance(r["需要のまとまり"], str) else None
+            rows = by_g[g0] if g0 else [r]
+            r["まとまりの品目数"] = len(rows)
+            tgt = None
+            if len(rows) >= 2:
+                tgt = (pick([x for x in rows if x["切替元"]])
+                       or pick([x for x in rows if not x["切替先"] and (not isinstance(x["供給状況"], str) or x["供給状況"] == "通常")
+                                and not x["発注除外"] and not x["経過措置"]])
+                       or pick([x for x in rows if not x["切替先"]]))
+            r["発注先"] = tgt
+            if g0:
+                w = sum((x.get("比較の予定合計") or 0) for x in rows)
+                r["まとまりのずれの割合"] = (sum((x.get("比較のずれ合計") or 0) for x in rows) / w) if w > 0 else None
+            else:
+                r["まとまりのずれの割合"] = r.get("ずれの割合")
         df = pd.DataFrame(recs)
         return df.sort_values(["払出合計", "薬品名"], ascending=[False, True], na_position="last").reset_index(drop=True)
 
