@@ -579,13 +579,15 @@ def fmt0(n):
 # 薬品グループ案（㉕）：薬品名を 成分＋剤形＋規格「屋号」 に分解して、需要のまとまりの案を出す（0.7.0）
 # ------------------------------------------------------------------------------
 FORMS = ["口腔内崩壊錠", "フィルムコーティング錠", "フィルムコート錠", "チュアブル錠", "ザイディス錠", "ザイディス",
-         "徐放カプセル", "徐放錠", "腸溶カプセル", "腸溶錠", "糖衣錠", "舌下錠", "バッカル錠",
+         "徐放カプセル", "徐放錠", "腸溶カプセル", "腸溶錠", "糖衣錠", "舌下錠", "バッカル錠", "配合OD錠", "配合錠", "配合カプセル",
          "ODフィルム", "OD錠", "D錠", "CR錠", "CRカプセル", "SR錠", "SRカプセル", "LA錠", "LAカプセル", "ER錠", "XR錠", "R錠", "錠",
-         "ソフトカプセル", "カプセル", "フィルム", "ドライシロップ", "シロップ", "点眼液", "点鼻液", "吸入液", "外用液", "内用液", "液",
-         "細粒", "顆粒", "散", "末", "丸", "トローチ", "テープ", "パップ", "ゲル", "軟膏", "クリーム", "ローション", "坐剤", "注"]
+         "ソフトカプセル", "カプセル", "フィルム", "ドライシロップ", "シロップ", "点眼液", "点鼻液", "吸入液", "うがい液", "外用液", "内用液", "液",
+         "配合顆粒", "配合散", "細粒", "顆粒", "散", "末", "丸", "トローチ", "テープ", "パップ", "ゲル", "眼軟膏", "軟膏", "クリーム", "ローション",
+         "坐剤", "サポ", "注"]
 TABLET_FORMS = {"口腔内崩壊錠", "フィルムコーティング錠", "フィルムコート錠", "チュアブル錠", "ザイディス錠", "ザイディス", "糖衣錠",
-                "ODフィルム", "OD錠", "D錠", "錠", "ソフトカプセル", "カプセル", "フィルム", "丸"}
-POWDER_FORMS = {"散", "顆粒", "細粒", "末"}
+                "配合OD錠", "配合錠", "配合カプセル", "ODフィルム", "OD錠", "D錠", "錠", "ソフトカプセル", "カプセル", "フィルム", "丸"}
+POWDER_FORMS = {"配合顆粒", "配合散", "散", "顆粒", "細粒", "末"}
+MARKS = "★☆※◎○●◆◇▲△▼▽■□ 　"
 LIQUID_FORMS = {"内用液", "シロップ", "液"}
 SLOW_FORMS = {"徐放カプセル", "徐放錠", "CR錠", "CRカプセル", "SR錠", "SRカプセル", "LA錠", "LAカプセル", "ER錠", "XR錠", "R錠"}
 ENTERIC_FORMS = {"腸溶カプセル", "腸溶錠"}
@@ -606,6 +608,28 @@ def _strip_tail(s):
             break
         s = s[:p].strip()
     return s
+
+
+BRAND_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "_data", "先発成分.csv")
+
+
+def _load_brands():
+    """先発名 → 成分名（src/_data/先発成分.csv。㉖ 先発成分 と同じ元）"""
+    m = {}
+    try:
+        with open(BRAND_CSV, encoding="utf-8-sig", newline="") as f:
+            for r in csv.DictReader(f):
+                b = nz((r.get("先発名") or "").strip()) or ""
+                g = (r.get("成分名") or "").strip()
+                if b and g and not b.startswith("#"):
+                    m[b] = g
+    except FileNotFoundError:
+        pass
+    return m
+
+
+BRAND_MAP = _load_brands()
+BRAND_NAMES = sorted(BRAND_MAP, key=len, reverse=True)
 
 
 def _canon_unit(u):
@@ -638,12 +662,15 @@ def parse_drug_name(name):
     n0 = nz(name) or ""
     for a_, b_ in UNIT_MAP:
         n0 = n0.replace(a_, b_)
+    n0 = n0.lstrip(MARKS)
     has_b = "「" in n0 and "」" in n0
     brand = n0[n0.index("「") + 1:n0.index("」")].strip() if has_b else None
-    core = _strip_tail(n0[:n0.index("「")] if has_b else n0)
-    form = next((f for f in FORMS if f in core), None)
-    f_pos = core.index(form) if form else -1
-    runs = _runs(core)
+    # 成分・剤形は「屋号」より前から、規格は名前全体から読む
+    pre = n0[:n0.index("「")] if has_b else n0
+    full = (pre + " " + n0[n0.index("」") + 1:]) if has_b else n0
+    form = next((f for f in FORMS if f in pre), None)
+    f_pos = pre.index(form) if form else -1
+    runs = _runs(full)
     with_u = [r for r in runs if r["単位あり"]]
     after_f = [] if form is None else [r for r in runs if r["位置"] == f_pos + len(form)]
     pick = with_u[0] if with_u else (after_f[0] if after_f else None)
@@ -651,7 +678,10 @@ def parse_drug_name(name):
     ok_str = pick is not None
     d_pos = pick["位置"] if pick else -1
     cuts = [x for x in (f_pos, d_pos) if x >= 0]
-    ingr = (core if not cuts else core[:min(cuts)]).replace(" ", "").replace("　", "")
+    ingr0 = _strip_tail(pre if not cuts else full[:min(cuts)]).replace(" ", "").replace("　", "")
+    # 屋号のない薬は先発名の表で成分名を引く（先頭一致、長い名前から）
+    brand0 = next((b for b in BRAND_NAMES if ingr0.startswith(b)), None) if (brand is None and ingr0) else None
+    ingr = BRAND_MAP[brand0] if brand0 else ingr0
     if not ingr or not ok_str or form is None:
         grp = None
     elif form in TABLET_FORMS:
@@ -669,14 +699,16 @@ def parse_drug_name(name):
     spec = None if not ingr else f"{ingr}{form or ''}{str0 if ok_str else ''}"
     if brand is not None and form is not None and ok_str:
         conf = "後発（屋号あり）"
+    elif brand0 is not None and form is not None and ok_str:
+        conf = "先発（成分名で結んだ）"
     elif brand is None and form is not None and ok_str:
         conf = "要確認：屋号なし（先発か旧名称。成分名で結ぶ）"
     elif form is None:
         conf = "要確認：剤形が読めない"
     else:
         conf = "要確認：規格が読めない"
-    return dict(成分案=(ingr or None), 剤形=form, 規格=(str0 if ok_str else None), 屋号=brand, 成分規格案=spec, まとまり案=grp,
-                先発後発案=("後発" if brand is not None else None), 確からしさ=conf)
+    return dict(成分案=(ingr or None), 剤形=form, 規格=(str0 if ok_str else None), 屋号=brand, 先発名=brand0, 成分規格案=spec, まとまり案=grp,
+                先発後発案=("後発" if brand is not None else "先発" if brand0 is not None else None), 確からしさ=conf)
 
 
 def propose_groups(m_drug, adj_names=None):
@@ -686,7 +718,7 @@ def propose_groups(m_drug, adj_names=None):
        先頭 6 列は手入力テーブル 薬品グループ と同じ並び（薬品名・成分規格・需要のまとまり・先発後発・供給状況・切替先）"""
     adj_names = adj_names or set()
     cols = ["薬品名", "成分規格", "需要のまとまり", "先発後発", "供給状況", "切替先", "載せた理由", "確からしさ", "同じまとまりの屋号数",
-            "略称", "成分（案）", "剤形", "規格", "屋号", "需要のまとまり（案）", "未登録", "違い"]
+            "略称", "成分（案）", "剤形", "規格", "屋号", "先発名", "需要のまとまり（案）", "未登録", "違い"]
     rows = []
     for _, r in m_drug.iterrows():
         p = parse_drug_name(r["薬品名"])

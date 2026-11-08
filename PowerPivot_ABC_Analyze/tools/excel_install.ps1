@@ -86,7 +86,8 @@ try {
         Write-Host ("対象: " + ($OnlyQueries -join " / "))
         foreach ($q in $queries) {
             if ($OnlyQueries -notcontains $q.name) { continue }
-            $wb.Queries.Item($q.name).Formula = $q.code; Write-Host ("更新 " + $q.name)
+            if ($have.ContainsKey($q.name)) { $wb.Queries.Item($q.name).Formula = $q.code; Write-Host ("更新 " + $q.name) }
+            else { $wb.Queries.Add($q.name, $q.code) | Out-Null; Write-Host ("追加 " + $q.name) }   # 新しいクエリ（接続のみ）も -OnlyQueries で足せる（0.11.0）
             if ($sheets.Contains($q.name)) {
                 $lo = $wb.Worksheets.Item($sheets[$q.name]).ListObjects.Item(1); $lo.QueryTable.BackgroundQuery = $false
                 try { $lo.QueryTable.Refresh($false) | Out-Null; Write-Host ("  " + $sheets[$q.name] + "：" + $lo.ListRows.Count + " 行") } catch { Write-Host ("※ 失敗 " + $q.name + "：" + $_.Exception.Message) }
