@@ -24,6 +24,7 @@ let
     Drugs = #"M_薬品",
 
     // 1つの薬について、当てはまるコードを {コード, 値, 線} の並びで返す
+    Pct  = (x as nullable number) as nullable number => if x = null then null else x * 100,
     Hits = (r as record) as list =>
         let
             stock = r[最終在庫] ?? 0,
@@ -52,6 +53,8 @@ let
                 else if typ = "まばら・大口" then {"D04", adi, null} else null,
                 if (r[予定外の月数] ?? 0) >= 1 then {"D05", r[予定外の月数], 1} else null,
                 if r[区分] = "D" and r[出どころ] <> "出納だけ" and r[切替先] = null then {"D06", r[患者の最少月], DLine} else null,
+                if r[傾向] = "増加" then {"D07", Pct(r[前期比]), Pct(r[年間比])} else null,
+                if r[傾向] = "減少" then {"D08", Pct(r[前期比]), Pct(r[年間比])} else null,
                 if gr <> null and gr >= GapRate then {"P01", gr * 100, GapRate * 100} else null,
                 if gr <> null and gr <= -GapRate then {"P02", -gr * 100, GapRate * 100} else null,
                 if gs <> null and gs >= GapSize then {"P03", gs * 100, GapSize * 100} else null,

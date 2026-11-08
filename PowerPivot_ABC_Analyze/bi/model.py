@@ -105,7 +105,7 @@ DEFAULTS = dict(不動とみなす月数=3, 在庫過多とみなす日数=60,
                 予測日数=7,                      # 0.6.0：発注書 F が読む来週の日数
                 出荷調整の構成比の変化=0.3, 出荷調整の合計の許容=0.3, 期限切迫の日数=180, 直近の月数=3,
                 # 0.3.0：包装単位を使わない。極小需要の線は「月の払出」1 本（G02・A の回転・E）
-                極小需要の月の払出=100)
+                極小需要の月の払出=100, 傾向の線=0.2)
 
 
 class Settings:
@@ -545,6 +545,9 @@ REASON_CODES = [
     ("D05", "需要", "注意", 2, "予定にない払出だけの月が {値}ヶ月あります。（臨時・新患・他科）"),
     # 0.5.0：区分 D（患者が極端に少ない。出納だけの薬は Q01 のまま。切替元は E05 だけ）
     ("D06", "需要", "注意", 2, "予定の患者が月 {値}人しかいません。（線 {線}人）区分 D：在庫は手で管理する薬です"),
+    # 0.10.0：傾向（直近 N ヶ月 vs その前 N ヶ月 vs 年間）
+    ("D07", "需要", "注意", 2, "増加傾向です。直近の払出は前の期の {値}%、年間の {線}% です。発注量を増やす余地を見てください。"),
+    ("D08", "需要", "注意", 2, "減少傾向です。直近の払出は前の期の {値}%、年間の {線}% です。発注量を減らすことを考えてください。"),
     # 0.7.0：薬品グループの 切替先
     ("E05", "期限・制度", "注意", 2, "切替元です。在庫 {在庫} は切替先の需要で {値}日で使い切る見込みです。返品できる分は返品してください。"),
     ("E06", "期限・制度", "注意", 2, "切替先です。切替元の在庫 {値} がなくなるまで、発注は控えめにしてください。"),
@@ -886,15 +889,20 @@ class Model:
         plan_months = sorted(set(pl["月"]))
         abc_n = int(S.num("ABCの月数"))
         recent_plan = plan_months[-abc_n:] if plan_months else []
+        prev_plan = plan_months[-2 * abc_n:-abc_n] if len(plan_months) >= 2 * abc_n else []
         q0 = S.start
         quarter_of = lambda m: ((m.year - q0.year) * 12 + m.month - q0.month) // 3
         pat_rows = {}
         for n, g in pl.groupby("薬品名"):
             rec = g[g["月"].isin(recent_plan)]
             act = g.loc[g["予定患者数"].fillna(0) > 0, "月"]
+            prv = g[g["月"].isin(prev_plan)]
             pat_rows[n] = dict(直近の月平均患者数=(None if not recent_plan else float(rec["予定患者数"].fillna(0).sum()) / len(recent_plan)),
+                               前の月平均患者数=(None if not prev_plan else float(prv["予定患者数"].fillna(0).sum()) / len(prev_plan)),
+                               年間の月平均患者数=(None if not plan_months else float(g["予定患者数"].fillna(0).sum()) / len(plan_months)),
                                稼働四半期数=len({quarter_of(m) for m in act}))
-        pat_default = dict(直近の月平均患者数=(None if not recent_plan else 0.0), 稼働四半期数=0)
+        pat_default = dict(直近の月平均患者数=(None if not recent_plan else 0.0), 前の月平均患者数=(None if not prev_plan else 0.0),
+                           年間の月平均患者数=(None if not plan_months else 0.0), 稼働四半期数=0)
         # 出納の指標
         sm = mon[mon["出納データあり"]]
         sui_months = sorted(set(sm["月"]))
@@ -904,6 +912,8 @@ class Model:
         recent_n = int(S.num("直近の月数"))
         recent_months = sui_months[-recent_n:] if sui_months else []
         recent_days = sum(month_end(m).day for m in recent_months)
+        prev_months = sui_months[-2 * recent_n:-recent_n] if len(sui_months) >= 2 * recent_n else []
+        prev_days = sum(month_end(m).day for m in prev_months)
         sui_rows = {}
         for n, g in sm.groupby("薬品名"):
             moved = g[g["出納に載った"]]
@@ -911,6 +921,9 @@ class Model:
             per_day = out / cal_days if cal_days else None
             rec_out = float(g.loc[g["月"].isin(recent_months), "払出数量"].fillna(0).sum())
             rec_per_day = rec_out / recent_days if recent_days else None
+            prv_out = float(g.loc[g["月"].isin(prev_months), "払出数量"].fillna(0).sum())
+            rec_both = g[g["月"].isin(recent_months) & g["予定とのずれ"].notna()]
+            rec_plan = float(rec_both["予定数量"].fillna(0).sum())
             last = moved.sort_values("月").iloc[-1] if len(moved) else None
             both = g[g["予定とのずれ"].notna()]
             plan_sum = float(both["予定数量"].fillna(0).sum())
@@ -926,12 +939,13 @@ class Model:
                                比較月数=int(len(both)), 比較の予定合計=plan_sum, 比較のずれ合計=gap_sum, ずれの割合=((gap_sum / plan_sum) if plan_sum > 0 else None),
                                ずれの大きさ=((abs_sum / plan_sum) if plan_sum > 0 else None),
                                予定外の月数=int(((both["予定数量"].fillna(0) == 0) & (both["払出数量"].fillna(0) > 0)).sum()),
-                               直近の払出合計=rec_out, 直近の1日平均払出=rec_per_day,
+                               直近の払出合計=rec_out, 直近の1日平均払出=rec_per_day, 前の払出合計=prv_out,
+                               直近のずれの割合=((float(rec_both["予定とのずれ"].sum()) / rec_plan) if rec_plan > 0 else None),
                                直近の在庫日数=((stock_v / rec_per_day) if (stock_v is not None and rec_per_day) else None))
         plan_cols = ["予定日数", "予定数量合計", "予定患者数合計", "最終予定日", "平均間隔", "ばらつき（CV²）", "需要の型", "1日平均予定"]
         sui_cols = ["動いた月数", "払出合計", "払出のあった月数", "月平均払出", "1日平均払出", "仕入合計", "入庫の概算合計", "その他の減少",
                     "最後に動いた月", "最終在庫", "動きのない月数", "在庫日数", "比較月数", "比較の予定合計", "比較のずれ合計", "ずれの割合", "ずれの大きさ", "予定外の月数",
-                    "直近の払出合計", "直近の1日平均払出", "直近の在庫日数"]
+                    "直近の払出合計", "直近の1日平均払出", "直近の在庫日数", "前の払出合計", "直近のずれの割合"]
         recs = []
         tr_map = dict(zip(trans["薬品名"], trans["経過措置期限"]))
         st_map = {r["薬品名"]: num(r.get("列数")) for _, r in stock.iterrows()}
@@ -1010,6 +1024,42 @@ class Model:
                 r["まとまりのずれの割合"] = (sum((x.get("比較のずれ合計") or 0) for x in rows) / w) if w > 0 else None
             else:
                 r["まとまりのずれの割合"] = r.get("ずれの割合")
+        # 傾向（0.10.0）：直近 N ヶ月 vs その前 N ヶ月 vs 年間（⑨ と同じ決まり）
+        trend_line, tiny, d_line = S.num("傾向の線"), S.num("極小需要の月の払出"), S.num("区分Dの患者数")
+        enough = len(prev_months) == recent_n and recent_days > 0
+
+        def judge(r1, r2, rp, pre):
+            if pre is not None:
+                return pre
+            if r1 is None or r2 is None:
+                return "増加" if rp > 0 else "横ばい"
+            if r1 >= 1 + trend_line and r2 >= 1 + trend_line:
+                return "増加"
+            if r1 <= 1 - trend_line and r2 <= 1 - trend_line:
+                return "減少"
+            return "横ばい"
+
+        def trend_of(rec, prv, al, avg_m):
+            rp = rec / recent_days if recent_days else 0.0
+            pp = prv / prev_days if prev_days else 0.0
+            ap = al / cal_days if cal_days else 0.0
+            r1 = rp / pp if pp > 0 else None
+            r2 = rp / ap if ap > 0 else None
+            pre = "月不足" if not enough else "少量" if (avg_m or 0) < tiny else None
+            return r1, r2, judge(r1, r2, rp, pre)
+
+        def pat_trend(rec, prv, al):
+            r1 = rec / prv if (prv is not None and prv > 0 and rec is not None) else None
+            r2 = rec / al if (al is not None and al > 0 and rec is not None) else None
+            pre = "月不足" if (prv is None or al is None or rec is None) else "少量" if al < d_line else None
+            return r1, r2, judge(r1, r2, (rec or 0), pre)
+        for r in recs:
+            g0 = r["需要のまとまり"] if isinstance(r["需要のまとまり"], str) else None
+            rows = by_g[g0] if g0 else [r]
+            z = lambda k: sum((x.get(k) or 0) for x in rows)
+            r["前期比"], r["年間比"], r["傾向"] = trend_of(r.get("直近の払出合計") or 0, r.get("前の払出合計") or 0, r.get("払出合計") or 0, r.get("月平均払出"))
+            r["まとまりの前期比"], r["まとまりの年間比"], r["まとまりの傾向"] = trend_of(z("直近の払出合計"), z("前の払出合計"), z("払出合計"), z("月平均払出"))
+            r["患者の前期比"], r["患者の年間比"], r["患者の傾向"] = pat_trend(r.get("直近の月平均患者数"), r.get("前の月平均患者数"), r.get("年間の月平均患者数"))
         df = pd.DataFrame(recs)
         return df.sort_values(["払出合計", "薬品名"], ascending=[False, True], na_position="last").reset_index(drop=True)
 
@@ -1073,6 +1123,9 @@ class Model:
             if typ in dmap: hits.append((dmap[typ], adi, None))
             if (g("予定外の月数") or 0) >= 1: hits.append(("D05", g("予定外の月数"), 1))
             if g("区分") == "D" and r["出どころ"] != "出納だけ" and not g("切替先"): hits.append(("D06", g("患者の最少月"), d_line))
+            pct = lambda x: None if x is None else x * 100
+            if g("傾向") == "増加": hits.append(("D07", pct(g("前期比")), pct(g("年間比"))))
+            if g("傾向") == "減少": hits.append(("D08", pct(g("前期比")), pct(g("年間比"))))
             if g("切替先"): hits.append(("E05", g("切替の使い切り日数"), None))
             if g("切替元"): hits.append(("E06", g("切替元の在庫"), None))
             if gr is not None and gr >= gap_r: hits.append(("P01", gr * 100, gap_r * 100))

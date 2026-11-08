@@ -25,7 +25,10 @@
 //    ・注意：限定出荷／出荷調整の疑い（⑬ G01・G02）／期限の近いロットを先に使う（⑭ 残り日数 ≦ 期限切迫の日数 か 返す量 > 0）／
 //            予定より n% 少なく出る／患者が少ない（区分 D）／経過措置品／予定にない薬／上限を超える（区分 A で 在庫＋目安 > 必要な最大在庫）／
 //            まとまりの発注先（n 品目を合算）／「X」に寄せる
-//    ・載せる薬：来週の予定か不足があるか（まとまりならその合計で見る）、注意（寄せる関係の注意を除く）があるか、
+//    【傾向】（0.10.0）M_薬品 の 傾向（まとまりなら まとまりの傾向）が 増加／減少 の薬は、列「傾向」に出し、注意に
+//        「減少傾向（直近 N ヶ月は前の N ヶ月の a%、年間の b%。患者は …）。目安を減らすか検討」のように書く。
+//        発注の目安の計算は変えない（予定 × 年間のずれ のまま）。増減の判断と量の調整は使う人に委ねる
+//    ・載せる薬：来週の予定か不足があるか（まとまりならその合計で見る）、注意（寄せる・傾向の注意を除く）があるか、
 //        区分 A（上限の確認のため常に載せる）。在庫が足りて注意もない薬は載せない。まとまりは発注先と屋号の行が並ぶ
 //    ・区分の列でオートフィルターをかければ、区分ごとに印刷できる
 // ================================================================================
@@ -35,6 +38,8 @@ let
                let v = Record.FieldOrDefault(Prm, key, null)
                in  if v = null or (v is text and Text.Trim(v) = "") then dflt else Number.From(v),
     GapRate = Num("ずれの注意割合", 0.3),
+    RecentN = Text.From(Number.RoundDown(Num("直近の月数", 3))),
+    P       = (x as nullable number) as text => if x = null then "－" else Number.ToText(Number.Round(x * 100, 0), "N0", "ja-JP") & "%",
     Near    = Num("期限切迫の日数", 180),
     F       = (n as nullable number) as text => if n = null then "" else Number.ToText(Number.Round(n, 0), "N0", "ja-JP"),
 
@@ -137,11 +142,18 @@ let
                           if r[切替元] <> null then (if pooled then "切替先（切替元の在庫は合算済み）"
                                                      else "切替先（切替元の在庫 " & F(r[切替元の在庫]) & " を使い切るまで控えめに）") else null,
                           if overCap then "上限を超える（在庫＋目安 " & F(gStock + oq) & " ＞ " & F(maxQ) & "）" else null}),
+            trend   = if pooled then r[まとまりの傾向] else r[傾向],
+            tr1     = if pooled then r[まとまりの前期比] else r[前期比],
+            tr2     = if pooled then r[まとまりの年間比] else r[年間比],
+            trendNotes = if trend = "増加" or trend = "減少" then
+                             {trend & "傾向（直近 " & RecentN & " ヶ月は前の " & RecentN & " ヶ月の " & P(tr1) & "、年間の " & P(tr2)
+                              & "。患者は " & (r[患者の傾向] ?? "不明") & "）。目安を" & (if trend = "増加" then "増やす" else "減らす") & "か検討"}
+                         else {},
             poolNotes = if not pooled then {}
                         else if target then {"まとまり「" & r[需要のまとまり] & "」の発注先（" & Text.From(r[まとまりの品目数]) & " 品目の " & grpTxt & "）"}
                         else {"「" & r[発注先] & "」に寄せる（まとまり「" & r[需要のまとまり] & "」：" & grpTxt & "）"},
             noteOther = Text.Combine(notes, "、"),
-            note    = Text.Combine(poolNotes & notes, "、"),
+            note    = Text.Combine(poolNotes & trendNotes & notes, "、"),
             verdict = if pooled and not target then "寄せる"
                       else if noOrder then "発注しない"
                       else if oq > 0 and careful then "控えめに"
@@ -157,6 +169,7 @@ let
              まとまりの予定_表示 = if pooled then r[まとまりの予定] else null,
              まとまりの在庫_表示 = if pooled then r[まとまりの在庫] else null,
              不足 = if target then short else null, ずれ = gap,
+             傾向 = if trend = "増加" or trend = "減少" then trend else null,
              見込み = if target then Number.Round(exp, 0) else null,
              発注の目安 = oq,
              必要な最大在庫 = if target then maxQ else null,
@@ -164,14 +177,14 @@ let
              判定 = verdict, 注意 = note,
              載せる = gPlan > 0 or short > 0 or noteOther <> "" or cls = "A",
              並び = order, 並び略 = sortAb, 並び先 = if target then 0 else 1]),
-    // 計算の中の 来週の予定・来週の患者 は J1 の列と同じ名前なので、先に外してから広げる
+    // 計算の中の 来週の予定・来週の患者・傾向 は M_薬品／J1 の列と同じ名前なので、先に外してから広げる
     E    = Table.ExpandRecordColumn(Table.RemoveColumns(Calc, {"来週の予定", "来週の患者", "在庫_予測", "在庫_薬",
-               "まとまりの予定", "まとまりの患者", "まとまりの在庫"}), "計算",
-               {"来週の予定", "来週の患者", "在庫", "需要のまとまり_表示", "まとまりの予定_表示", "まとまりの在庫_表示", "不足", "ずれ", "見込み",
+               "まとまりの予定", "まとまりの患者", "まとまりの在庫", "傾向"}), "計算",
+               {"来週の予定", "来週の患者", "在庫", "需要のまとまり_表示", "まとまりの予定_表示", "まとまりの在庫_表示", "不足", "ずれ", "傾向", "見込み",
                 "発注の目安", "必要な最大在庫", "最大の期間", "判定", "注意", "載せる", "並び", "並び略", "並び先"}),
     Sel  = Table.SelectRows(E, each [載せる]),
     Out  = Table.SelectColumns(Sel, {"区分", "略称", "薬品名", "来週の予定", "来週の患者", "在庫",
-               "需要のまとまり_表示", "まとまりの予定_表示", "まとまりの在庫_表示", "不足", "ずれ", "見込み",
+               "需要のまとまり_表示", "まとまりの予定_表示", "まとまりの在庫_表示", "不足", "ずれ", "傾向", "見込み",
                "発注の目安", "必要な最大在庫", "最大の期間", "判定", "注意", "まとまりキー", "並び", "並び略", "並び先"}),
     Ren  = Table.RenameColumns(Out, {{"需要のまとまり_表示", "需要のまとまり"}, {"まとまりの予定_表示", "まとまりの予定"},
                {"まとまりの在庫_表示", "まとまりの在庫"}}),
@@ -179,7 +192,7 @@ let
                {"区分", type text}, {"略称", type text}, {"薬品名", type text}, {"来週の予定", type number},
                {"来週の患者", type number}, {"在庫", type number}, {"需要のまとまり", type text},
                {"まとまりの予定", type number}, {"まとまりの在庫", type number},
-               {"不足", type number}, {"ずれ", Percentage.Type},
+               {"不足", type number}, {"ずれ", Percentage.Type}, {"傾向", type text},
                {"見込み", type number}, {"発注の目安", type number}, {"必要な最大在庫", type number},
                {"最大の期間", type text}, {"判定", type text}, {"注意", type text},
                {"まとまりキー", type text}, {"並び", Int64.Type}, {"並び略", type text}, {"並び先", Int64.Type}}),

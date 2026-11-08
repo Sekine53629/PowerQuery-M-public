@@ -28,7 +28,8 @@ OUT = os.path.join(HERE, "out")
 START, END = dt.date(2026, 4, 1), dt.date(2026, 9, 30)   # 実績・出納の期間（6か月）
 BASE_DATE = dt.date(2026, 10, 1)                          # 設定「発注日」（経過措置の基準日）
 TH = dict(不動とみなす月数=3, 在庫過多とみなす日数=60, ずれの注意割合=0.3, ずれの大きさの注意割合=0.5,
-          区分Aの線=1000, 区分Bの線=300, 区分Dの患者数=2)          # 0.5.0：区分の線
+          区分Aの線=1000, 区分Bの線=300, 区分Dの患者数=2,          # 0.5.0：区分の線
+          極小需要の月の払出=100, 傾向の線=0.2)                    # 0.10.0：傾向（少量の線と増減の線）
 RECENT_N = 3                                              # 設定「直近の月数」の初期値（直近の払出・在庫日数・S05）
 ABC_N = 3                                                 # 設定「ABCの月数」の初期値（区分の窓）
 FC_DAYS = 7                                               # 設定「予測日数」の初期値（発注書 F の来週）
@@ -51,11 +52,12 @@ WD = "月火水木金土日"
 
 # 薬：名前・略称・型・1回あたりの量・処方の確率・実際/予定の倍率・臨時の確率
 #   kind: regular（定期）, sparse（まばら）, dead（最初の月だけ動く）, ending（途中で処方終了）,
-#         extra（予定に出ない＝出納だけ）, planonly（予定だけ＝出納と名前がずれる）
+#         extra（予定に出ない＝出納だけ）, planonly（予定だけ＝出納と名前がずれる）,
+#         rising（処方の確率が 0.5p → 1.5p に増えていく。傾向「増加」の確認用）
 DRUGS = [
     ("デエビゴ錠2.5mg",            "ﾃﾞｴﾋﾞｺﾞ2.5", "regular",  28, 0.95, 1.00, 0.10),
     ("セルトラリン錠25mg「アメル」", "ｾﾙﾄﾗﾘﾝ25",   "regular",  14, 0.80, 1.05, 0.15),
-    ("セルトラリン錠25mg「トーワ」", "ｾﾙﾄﾗﾄﾜ25",   "regular",  14, 0.35, 1.00, 0.10),
+    ("セルトラリン錠25mg「トーワ」", "ｾﾙﾄﾗﾄﾜ25",   "rising",   14, 0.35, 1.00, 0.10),
     ("エスシタロプラム錠10mg",       "ｴｽｼﾀﾛ10",    "regular",  28, 0.60, 1.00, 0.05),
     ("タンドスピロン錠10mg「サワイ」", "ﾀﾝﾄﾞｽﾋﾟﾛﾝ10", "regular", 42, 0.30, 1.40, 0.20),
     ("ビペリデン錠1mg",              "ﾋﾞﾍﾟﾘﾃﾞﾝ1",  "sparse",   28, 0.08, 1.00, 0.05),
@@ -115,8 +117,11 @@ def simulate():
                 if rnd.random() < p:
                     pts = rnd.randint(1, 2); plan[d][name] = (qty * pts, pts)
                 continue
+            elif kind == "rising":
+                if rnd.random() < p * (0.5 + (d - START).days / max(1, (END - START).days)):
+                    pts = rnd.randint(1, 3); q = qty * pts
             elif rnd.random() < p:
-                pts = rnd.randint(1, 3) if kind == "regular" else 1
+                pts = rnd.randint(1, 3) if kind in ("regular", "rising") else 1
                 q = qty * pts
             if q > 0 and kind != "extra":
                 plan[d][name] = (q, pts)
@@ -293,7 +298,7 @@ def write_forecast(mon, info, plan_name, H, HDR):
             if kind in ("extra", "dead"):
                 continue
             if rnd.random() < p:
-                pts = rnd.randint(1, 3) if kind == "regular" else 1
+                pts = rnd.randint(1, 3) if kind in ("regular", "rising") else 1
                 fc[d][name] = (qty * pts, pts)
     sheets = []
     for d in sorted(fc):
@@ -510,6 +515,14 @@ def expected(days, plan, mon, info, plan_name, fudo, fc):
         recent = months[-RECENT_N:]
         rec_days = sum(month_end(m).day for m in recent)
         rec_out = sum(x["払出数量"] for x in rows if x["月"] in recent)
+        prev_m = months[-2 * RECENT_N:-RECENT_N] if len(months) >= 2 * RECENT_N else []
+        prev_out = sum(x["払出数量"] for x in rows if x["月"] in prev_m)
+        pm = defaultdict(float)                      # 月 → 予定の延べ患者数
+        for dd, (q0, p0) in tday.get(name, {}).items():
+            pm[dt.date(dd.year, dd.month, 1)] += p0
+        prev_pm = months[-2 * ABC_N:-ABC_N] if len(months) >= 2 * ABC_N else []
+        pats3 = (sum(pm[m] for m in months[-ABC_N:]) / ABC_N, (sum(pm[m] for m in prev_pm) / len(prev_pm)) if prev_pm else None,
+                 sum(pm[m] for m in months) / len(months))
         rec_pd = rec_out / rec_days if rec_days else None
         last = max(moved, key=lambda x: x["月"]) if moved else None
         still = (latest.year - last["月"].year) * 12 + latest.month - last["月"].month if last else None
@@ -556,7 +569,8 @@ def expected(days, plan, mon, info, plan_name, fudo, fc):
         fmat[name] = dict(plan7=sum(v[0] for v in fcd.values()), pats7=sum(v[1] for v in fcd.values()),
                           stock_f=(fcd[max(fcd)][2] if fcd else (stock if stock is not None else 0)),
                           gap_own=d["ずれの割合"], plan_sum=plan_sum, gap_sum=gap_sum, blocks=blocks, cls=cls_d, trans=trans, src=src,
-                          sw_to=sw_to, is_sw_from=(name in sw_from), rec_out=rec_out)
+                          sw_to=sw_to, is_sw_from=(name in sw_from), rec_out=rec_out,
+                          prev_out=prev_out, out_sum=out_sum, avg_m=out_sum / len(months), pats3=pats3)
         gr, gs = d["ずれの割合"], d["ずれの大きさ"]
         if gr is not None and gr >= TH["ずれの注意割合"]: codes.append("P01")
         if gr is not None and gr <= -TH["ずれの注意割合"]: codes.append("P02")
@@ -585,6 +599,46 @@ def expected(days, plan, mon, info, plan_name, fudo, fc):
                 target_of[n] = t
     for d in m_drug:
         d["発注先"] = target_of.get(d["薬品名"])
+    # ---- 傾向（0.10.0）：直近 N ヶ月 vs その前 N ヶ月 vs 年間（⑨ と同じ決まり）----
+    prev_m_all = months[-2 * RECENT_N:-RECENT_N] if len(months) >= 2 * RECENT_N else []
+    prev_days_all = sum(month_end(m).day for m in prev_m_all)
+    rec_days_all = sum(month_end(m).day for m in months[-RECENT_N:])
+    enough = len(prev_m_all) == RECENT_N
+
+    def judge(r1, r2, rp, pre):
+        if pre is not None:
+            return pre
+        if r1 is None or r2 is None:
+            return "増加" if rp > 0 else "横ばい"
+        if r1 >= 1 + TH["傾向の線"] and r2 >= 1 + TH["傾向の線"]:
+            return "増加"
+        if r1 <= 1 - TH["傾向の線"] and r2 <= 1 - TH["傾向の線"]:
+            return "減少"
+        return "横ばい"
+
+    def trend_of(rec, prv, al, avg_m):
+        rp = rec / rec_days_all; pp = prv / prev_days_all if prev_days_all else 0; ap = al / cal_days
+        r1 = rp / pp if pp > 0 else None; r2 = rp / ap if ap > 0 else None
+        pre = "月不足" if not enough else "少量" if avg_m < TH["極小需要の月の払出"] else None
+        return r1, r2, judge(r1, r2, rp, pre)
+
+    def pat_trend(rec, prv, al):
+        r1 = rec / prv if (prv is not None and prv > 0) else None; r2 = rec / al if al > 0 else None
+        pre = "月不足" if prv is None else "少量" if al < TH["区分Dの患者数"] else None
+        return r1, r2, judge(r1, r2, rec, pre)
+    trend_of_name = {}
+    for name, f in fmat.items():
+        mem = members[GROUP_OF[name]] if name in GROUP_OF else [name]
+        own = trend_of(f["rec_out"], f["prev_out"], f["out_sum"], f["avg_m"])
+        grp = trend_of(sum(fmat[n]["rec_out"] for n in mem), sum(fmat[n]["prev_out"] for n in mem),
+                       sum(fmat[n]["out_sum"] for n in mem), sum(fmat[n]["avg_m"] for n in mem))
+        trend_of_name[name] = (own, grp, pat_trend(*f["pats3"]))
+    for d in m_drug:
+        own, grp, pat = trend_of_name[d["薬品名"]]
+        d["前期比"], d["年間比"], d["傾向"] = own
+        d["まとまりの傾向"], d["患者の傾向"] = grp[2], pat[2]
+        if own[2] == "増加": reasons.append(dict(薬品名=d["薬品名"], コード="D07"))
+        if own[2] == "減少": reasons.append(dict(薬品名=d["薬品名"], コード="D08"))
     # ---- 発注書 F（㉔）：まとまりは予定・在庫を合算し、発注先の行に目安を出す。ほかの屋号は「寄せる」----
     for name, f in fmat.items():
         tgt = target_of.get(name)
@@ -612,10 +666,12 @@ def expected(days, plan, mon, info, plan_name, fudo, fc):
         verdict = ("寄せる" if (pooled and not is_t) else "発注しない" if no_order
                    else "控えめに" if (oq > 0 and careful) else "発注する" if oq > 0 else "不要")
         short = max(0, g_plan - g_stock)
+        tr = (trend_of_name[name][1] if pooled else trend_of_name[name][0])[2]
         if g_plan > 0 or short > 0 or note_det or cls == "A":
             orders.append(dict(薬品名=name, 区分=cls, 来週の予定=f["plan7"], 来週の患者=f["pats7"], 在庫=f["stock_f"],
                                まとまりの予定=(g_plan if pooled else None), まとまりの在庫=(g_stock if pooled else None),
-                               不足=(short if is_t else None), 発注の目安=oq, 必要な最大在庫=(max_q if is_t else None), 判定=verdict))
+                               不足=(short if is_t else None), 傾向=(tr if tr in ("増加", "減少") else None),
+                               発注の目安=oq, 必要な最大在庫=(max_q if is_t else None), 判定=verdict))
     wb = Workbook(); wb.remove(wb.active)
     for title, data in (("T_月次", t_mon), ("M_薬品", m_drug), ("T_判定理由", reasons), ("T_ABC月次", abc_rows), ("R_発注書", orders)):
         ws = wb.create_sheet(title)

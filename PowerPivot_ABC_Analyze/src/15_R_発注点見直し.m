@@ -11,6 +11,8 @@
 //    ・月01～月12：直近12ヶ月（出納のある月）の払出。月12 が一番新しい月（スパークライン用）
 //    ・区分変更：変わったら「○」（印刷して読む表なので、真偽ではなく印にする）
 //    ・今月の区分：⑫ の区分（A／B／C／D）。量の区分・月平均払出・月平均患者数 は区分の根拠（0.5.0）
+//    ・傾向・年間比・患者の傾向：M_薬品 の まとまりの傾向・まとまりの年間比・患者の傾向（代表の薬の行。0.10.0）。
+//        直近 N ヶ月 vs その前 N ヶ月（変化）に加えて 年間 と比べ、増加／減少 なら理由に書く。発注量の調整は使う人に委ねる
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -55,12 +57,12 @@ let
                  {"屋号数", each Table.RowCount(_), Int64.Type},
                  {"r", each Table.First(Table.Sort(_, {{"k", Order.Ascending}, {"直近の払出合計", Order.Descending}})), type record}}),
     RepE   = Table.ExpandRecordColumn(Rep, "r",
-                 {"薬品名", "直近の1日平均払出", "ずれの大きさ"},
-                 {"代表の薬", "直近の1日平均払出", "ずれの大きさ"}),
+                 {"薬品名", "直近の1日平均払出", "ずれの大きさ", "まとまりの傾向", "まとまりの年間比", "患者の傾向"},
+                 {"代表の薬", "直近の1日平均払出", "ずれの大きさ", "傾向", "年間比", "患者の傾向"}),
 
     J1 = Table.ExpandTableColumn(Table.NestedJoin(AbcCur, {"需要のまとまり"}, PerGrp, {"まとまり"}, "sj", JoinKind.LeftOuter), "sj", {"s"}),
     J2 = Table.ExpandTableColumn(Table.NestedJoin(J1, {"需要のまとまり"}, RepE, {"まとまり"}, "r", JoinKind.LeftOuter), "r",
-             {"屋号数", "代表の薬", "直近の1日平均払出", "ずれの大きさ"}),
+             {"屋号数", "代表の薬", "直近の1日平均払出", "ずれの大きさ", "傾向", "年間比", "患者の傾向"}),
 
     Calc = Table.AddColumn(J2, "計算", each
         let
@@ -85,7 +87,10 @@ let
             reason  = Text.Combine(List.RemoveNulls({
                           if changed then "区分 " & [前月の区分] & "→" & [区分] else null,
                           if moved then "直近" & Text.From(N) & "ヶ月の払出が前の" & Text.From(N) & "ヶ月より "
-                                        & (if chg >= 0 then "+" else "") & Text.From(Number.Round(chg * 100, 0)) & "%" else null}), "、"),
+                                        & (if chg >= 0 then "+" else "") & Text.From(Number.Round(chg * 100, 0)) & "%" else null,
+                          if [傾向] = "増加" or [傾向] = "減少" then
+                              [傾向] & "傾向（年間の " & (if [年間比] = null then "－" else Text.From(Number.Round([年間比] * 100, 0)) & "%")
+                              & "。患者は " & ([患者の傾向] ?? "不明") & "）" else null}), "、"),
             months  = Record.FromList(s, MonthCols)
         in
             [直近の払出 = recent, 前の払出 = before, 変化 = chg, 変化の大きさ = if chg = null then 0 else Number.Abs(chg),
@@ -95,13 +100,14 @@ let
     Sel  = Table.SelectRows(E, each [対象]),
     Per  = Table.AddColumn(Sel, "期間", (x) => Date.ToText(List.First(Last12), "yyyy/MM") & "～" & Date.ToText(Cur, "yyyy/MM"), type text),
     Out  = Table.SelectColumns(Per, {"需要のまとまり", "屋号数", "代表の薬", "前月の区分", "区分", "区分変更", "量の区分", "月平均払出", "月平均患者数",
-               "直近の払出", "前の払出", "変化", "構成比", "持ち方", "発注点の目安", "発注量の目安", "理由", "期間"} & MonthCols & {"変化の大きさ"}),
+               "直近の払出", "前の払出", "変化", "傾向", "年間比", "患者の傾向", "構成比", "持ち方", "発注点の目安", "発注量の目安", "理由", "期間"} & MonthCols & {"変化の大きさ"}),
     Ren  = Table.RenameColumns(Out, {{"区分", "今月の区分"}}),
     Typed = Table.TransformColumnTypes(Ren, {
                {"需要のまとまり", type text}, {"屋号数", Int64.Type}, {"代表の薬", type text}, {"前月の区分", type text},
                {"今月の区分", type text}, {"区分変更", type text}, {"量の区分", type text}, {"月平均払出", type number},
                {"月平均患者数", type number}, {"直近の払出", type number}, {"前の払出", type number},
-               {"変化", Percentage.Type}, {"構成比", Percentage.Type}, {"持ち方", type text},
+               {"変化", Percentage.Type}, {"傾向", type text}, {"年間比", type number}, {"患者の傾向", type text},
+               {"構成比", Percentage.Type}, {"持ち方", type text},
                {"発注点の目安", type number}, {"発注量の目安", type number}, {"理由", type text}, {"期間", type text},
                {"変化の大きさ", type number}} & List.Transform(MonthCols, (c) => {c, type number})),
     Sorted = Table.Sort(Typed, {{"区分変更", Order.Descending}, {"変化の大きさ", Order.Descending}, {"需要のまとまり", Order.Ascending}}),

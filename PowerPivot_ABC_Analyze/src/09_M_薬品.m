@@ -50,6 +50,17 @@
 //      まとまりのずれの割合：まとまり全体の 比較のずれ合計 の合計 ÷ 比較の予定合計 の合計（未登録なら自分の ずれの割合）。
 //                       切替で払出が旧品・予定が新品に分かれていても、まとまりとして正しく出る
 //      比較の予定合計 ：ずれの割合 の分母（出納と予定の両方がある月の予定の合計）。比較のずれ合計：その分子（払出 − 予定 の合計）
+//    【傾向】直近 N ヶ月（設定「直近の月数」）vs その前 N ヶ月 vs 年間（出納のある月すべて）の 1 日平均払出で見る（0.10.0）
+//      前の払出合計   ：直近 N ヶ月の前の N ヶ月の払出の合計。前期比 ＝ 直近の1日平均払出 ÷ 前の N ヶ月の1日平均払出、
+//                       年間比 ＝ 直近の1日平均払出 ÷ 1日平均払出（年間）
+//      傾向           ：増加 ＝ 前期比・年間比とも 1 ＋「傾向の線」以上／減少 ＝ とも 1 − 線 以下／横ばい ＝ それ以外／
+//                       少量 ＝ 月平均払出が「極小需要の月の払出」未満（まばらな薬は判定しない）／月不足 ＝ 出納が 2N ヶ月に足りない
+//      まとまりの前期比・年間比・傾向：同じ需要のまとまりの払出を合算して同じ見方をしたもの（未登録なら自分の値）。切替で旧品→新品に
+//                       移っていても、まとまりとしては横ばいと分かる
+//      直近のずれの割合：直近 N ヶ月だけの（払出 − 予定）÷ 予定（来なくなった患者の分は年間より先にここに出る）
+//      患者の前期比・年間比・傾向：予定の延べ患者数（予定データのある月）で同じ見方（前の月平均患者数・年間の月平均患者数）。
+//                       少量 ＝ 年間の月平均患者数が「区分Dの患者数」未満。払出の傾向と見比べて「患者が減った」か「用量が変わった」かを分ける
+//      傾向は表示と注意（D07・D08、F の注意）だけに使い、発注の目安の計算は変えない。発注量の調整は使う人に委ねる
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -58,6 +69,9 @@ let
                in  if v = null or (v is text and Text.Trim(v) = "") then dflt else Number.From(v),
     RecentN = Number.RoundDown(Num("直近の月数", 3)),
     AbcN    = Number.RoundDown(Num("ABCの月数", 3)),
+    TrendLine = Num("傾向の線", 0.2),
+    TinyOut   = Num("極小需要の月の払出", 100),
+    DLine     = Num("区分Dの患者数", 2),
 
     Day  = Table.Buffer(#"T_日次"),
     Mon  = Table.Buffer(#"T_月次"),
@@ -139,6 +153,11 @@ let
     // 直近 N ヶ月（出納のある月の並びで新しい方から）
     RecentMonths = List.Buffer(List.LastN(List.Sort(SuiMonths), RecentN)),
     RecentDays   = List.Sum(List.Transform(RecentMonths, (m) => Date.Day(Date.EndOfMonth(m)))) ?? 0,
+    // その前の N ヶ月（傾向用。出納が 2N ヶ月に足りなければ空）
+    PrevMonths   = List.Buffer(if List.Count(SuiMonths) >= 2 * RecentN
+                               then List.FirstN(List.LastN(List.Sort(SuiMonths), 2 * RecentN), RecentN) else {}),
+    PrevDays     = List.Sum(List.Transform(PrevMonths, (m) => Date.Day(Date.EndOfMonth(m)))) ?? 0,
+    EnoughMon    = List.Count(PrevMonths) = RecentN and RecentDays > 0,
     MonG = Table.Group(SuiMon, {"薬品名"}, {{"m", each
         let
             moved   = Table.SelectRows(_, each [出納に載った]),
@@ -153,7 +172,11 @@ let
             absSum  = List.Sum(List.Transform(both[予定とのずれ], Number.Abs)),
             rec     = Table.SelectRows(_, each List.Contains(RecentMonths, [月])),
             recOut  = List.Sum(rec[払出数量]) ?? 0,
-            recPd   = if RecentDays > 0 then recOut / RecentDays else null
+            recPd   = if RecentDays > 0 then recOut / RecentDays else null,
+            prv     = Table.SelectRows(_, each List.Contains(PrevMonths, [月])),
+            prvOut  = List.Sum(prv[払出数量]) ?? 0,
+            recBoth = Table.SelectRows(rec, each [予定とのずれ] <> null),
+            recPlan = List.Sum(recBoth[予定数量]) ?? 0
         in
             [動いた月数 = Table.RowCount(moved), 払出合計 = out,
              払出のあった月数 = List.Count(List.Select([払出数量], (x) => x <> null and x > 0)),
@@ -169,7 +192,8 @@ let
              ずれの割合 = if planSum > 0 then gapSum / planSum else null,
              ずれの大きさ = if planSum > 0 then absSum / planSum else null,
              予定外の月数 = Table.RowCount(Table.SelectRows(both, each ([予定数量] ?? 0) = 0 and ([払出数量] ?? 0) > 0)),
-             直近の払出合計 = recOut, #"直近の1日平均払出" = recPd,
+             直近の払出合計 = recOut, #"直近の1日平均払出" = recPd, 前の払出合計 = prvOut,
+             直近のずれの割合 = if recPlan > 0 then (List.Sum(recBoth[予定とのずれ]) ?? 0) / recPlan else null,
              直近の在庫日数 = if stock <> null and recPd <> null and recPd > 0 then stock / recPd else null],
         type record}}),
 
@@ -184,6 +208,7 @@ let
     PlanMon    = Table.SelectRows(Mon, each [予定データあり]),
     PlanMonths = List.Buffer(List.Sort(List.Distinct(PlanMon[月]))),
     RecentPlan = List.Buffer(List.LastN(PlanMonths, AbcN)),
+    PrevPlan   = List.Buffer(if List.Count(PlanMonths) >= 2 * AbcN then List.FirstN(List.LastN(PlanMonths, 2 * AbcN), AbcN) else {}),
     QStart     = Date.From(Prm[開始日]),
     QuarterOf  = (m as date) as number =>
                      Number.IntegerDivide((Date.Year(m) - Date.Year(QStart)) * 12 + Date.Month(m) - Date.Month(QStart), 3),
@@ -191,9 +216,14 @@ let
         let
             rec = Table.SelectRows(_, each List.Contains(RecentPlan, [月])),
             nR  = List.Count(RecentPlan),
+            prv = Table.SelectRows(_, each List.Contains(PrevPlan, [月])),
+            nP  = List.Count(PrevPlan),
+            nA  = List.Count(PlanMonths),
             act = Table.SelectRows(_, each ([予定患者数] ?? 0) > 0)[月]
         in
             [直近の月平均患者数 = if nR = 0 then null else (List.Sum(rec[予定患者数]) ?? 0) / nR,
+             前の月平均患者数 = if nP = 0 then null else (List.Sum(prv[予定患者数]) ?? 0) / nP,
+             年間の月平均患者数 = if nA = 0 then null else (List.Sum([予定患者数]) ?? 0) / nA,
              稼働四半期数 = List.Count(List.Distinct(List.Transform(act, QuarterOf)))], type record}}),
 
     // ---- つなぐ ----
@@ -212,7 +242,7 @@ let
     SuiCols  = {"動いた月数", "払出合計", "払出のあった月数", "月平均払出", "1日平均払出", "仕入合計", "入庫の概算合計",
                 "その他の減少", "最後に動いた月", "最終在庫", "動きのない月数", "在庫日数",
                 "比較月数", "比較の予定合計", "比較のずれ合計", "ずれの割合", "ずれの大きさ", "予定外の月数",
-                "直近の払出合計", "直近の1日平均払出", "直近の在庫日数"},
+                "直近の払出合計", "直近の1日平均払出", "直近の在庫日数", "前の払出合計", "直近のずれの割合"},
     E1 = Table.ExpandRecordColumn(Table.TransformColumns(J7, {{"予定", each _ ?? Record.FromList(List.Repeat({null}, List.Count(PlanCols)), PlanCols)}}), "予定", PlanCols),
     E2 = Table.ExpandRecordColumn(Table.TransformColumns(E1, {{"出納", each _ ?? Record.FromList(List.Repeat({null}, List.Count(SuiCols)), SuiCols)}}), "出納", SuiCols),
 
@@ -241,9 +271,11 @@ let
              Table.ExpandTableColumn(Table.NestedJoin(K1, {"まとまりキー"}, AbcLatest, {"需要のまとまり"}, "x", JoinKind.LeftOuter), "x",
                  {"区分", "量の区分", "患者の最少月"}), {"まとまりキー"}),
     J10 = Table.ExpandTableColumn(Table.NestedJoin(J9, {"薬品名"}, PatG, {"薬品名"}, "x", JoinKind.LeftOuter), "x", {"m"}, {"患者"}),
-    PatCols = {"直近の月平均患者数", "稼働四半期数"},
+    PatCols = {"直近の月平均患者数", "前の月平均患者数", "年間の月平均患者数", "稼働四半期数"},
     E3 = Table.ExpandRecordColumn(Table.TransformColumns(J10, {{"患者", each _ ??
-             [直近の月平均患者数 = if List.IsEmpty(RecentPlan) then null else 0, 稼働四半期数 = 0]}}), "患者", PatCols),
+             [直近の月平均患者数 = if List.IsEmpty(RecentPlan) then null else 0,
+              前の月平均患者数 = if List.IsEmpty(PrevPlan) then null else 0,
+              年間の月平均患者数 = if List.IsEmpty(PlanMonths) then null else 0, 稼働四半期数 = 0]}}), "患者", PatCols),
 
     Fin = Table.AddColumn(E3, "f", each
             [製剤_表示 = [製剤] ?? [製剤_予定],
@@ -287,11 +319,49 @@ let
     F5 = Table.ReplaceValue(F4, each [まとまりのずれの割合], each if [需要のまとまり] = null then [ずれの割合] else [まとまりのずれの割合],
              Replacer.ReplaceValue, {"まとまりのずれの割合"}),
 
-    Out = Table.SelectColumns(F5, {
+    // ---- 傾向（0.10.0）：直近 N ヶ月 vs その前 N ヶ月 vs 年間 ----
+    TrendOf = (rec as number, prv as number, all as number, avgM as nullable number) as record =>
+        let rp = if RecentDays > 0 then rec / RecentDays else 0,
+            pp = if PrevDays > 0 then prv / PrevDays else 0,
+            ap = if CalDays > 0 then all / CalDays else 0,
+            r1 = if pp > 0 then rp / pp else null,
+            r2 = if ap > 0 then rp / ap else null,
+            t  = if not EnoughMon then "月不足"
+                 else if (avgM ?? 0) < TinyOut then "少量"
+                 else if r1 = null or r2 = null then (if rp > 0 then "増加" else "横ばい")
+                 else if r1 >= 1 + TrendLine and r2 >= 1 + TrendLine then "増加"
+                 else if r1 <= 1 - TrendLine and r2 <= 1 - TrendLine then "減少" else "横ばい"
+        in  [前期比 = r1, 年間比 = r2, 傾向 = t],
+    PatTrend = (rec as nullable number, prv as nullable number, all as nullable number) as record =>
+        let r1 = if prv <> null and prv > 0 and rec <> null then rec / prv else null,
+            r2 = if all <> null and all > 0 and rec <> null then rec / all else null,
+            t  = if prv = null or all = null or rec = null then "月不足"
+                 else if all < DLine then "少量"
+                 else if r1 = null or r2 = null then (if rec > 0 then "増加" else "横ばい")
+                 else if r1 >= 1 + TrendLine and r2 >= 1 + TrendLine then "増加"
+                 else if r1 <= 1 - TrendLine and r2 <= 1 - TrendLine then "減少" else "横ばい"
+        in  [患者の前期比 = r1, 患者の年間比 = r2, 患者の傾向 = t],
+    Sum0 = (l as list) as number => List.Sum(List.Transform(l, (v) => v ?? 0)) ?? 0,
+    GrpT = Table.Group(Table.SelectRows(F5, each [需要のまとまり] <> null), {"需要のまとまり"}, {
+               {"g", each TrendOf(Sum0([直近の払出合計]), Sum0([前の払出合計]), Sum0([払出合計]), Sum0([月平均払出])), type record}}),
+    F6 = Table.ExpandRecordColumn(
+             Table.ExpandTableColumn(Table.NestedJoin(F5, {"需要のまとまり"}, GrpT, {"需要のまとまり"}, "t", JoinKind.LeftOuter), "t", {"g"}),
+             "g", {"前期比", "年間比", "傾向"}, {"まとまりの前期比", "まとまりの年間比", "まとまりの傾向"}),
+    F7 = Table.AddColumn(F6, "tr", each TrendOf([直近の払出合計] ?? 0, [前の払出合計] ?? 0, [払出合計] ?? 0, [月平均払出])
+                                        & PatTrend([直近の月平均患者数], [前の月平均患者数], [年間の月平均患者数]), type record),
+    F8 = Table.ExpandRecordColumn(F7, "tr", {"前期比", "年間比", "傾向", "患者の前期比", "患者の年間比", "患者の傾向"}),
+    // 未登録の薬は、まとまりの値 ＝ 自分の値
+    F9a = Table.ReplaceValue(F8, each [まとまりの前期比], each if [需要のまとまり] = null then [前期比] else [まとまりの前期比], Replacer.ReplaceValue, {"まとまりの前期比"}),
+    F9b = Table.ReplaceValue(F9a, each [まとまりの年間比], each if [需要のまとまり] = null then [年間比] else [まとまりの年間比], Replacer.ReplaceValue, {"まとまりの年間比"}),
+    F9  = Table.ReplaceValue(F9b, each [まとまりの傾向], each if [需要のまとまり] = null then [傾向] else [まとまりの傾向], Replacer.ReplaceValue, {"まとまりの傾向"}),
+
+    Out = Table.SelectColumns(F9, {
               "薬品名", "略称", "製剤_表示", "単位", "棚番", "コード", "品名の先頭空白",
               "経過措置", "経過措置期限", "発注除外", "成分規格", "需要のまとまり", "先発後発",
               "列数", "出どころ", "供給状況", "区分_切替", "量の区分", "患者の最少月", "切替先", "切替元", "切替元の在庫",
-              "まとまり払出", "切替の使い切り日数", "まとまりの品目数", "発注先", "まとまりのずれの割合"} & PlanCols & PatCols & SuiCols & {"まとまり内で最多",
+              "まとまり払出", "切替の使い切り日数", "まとまりの品目数", "発注先", "まとまりのずれの割合",
+              "前期比", "年間比", "傾向", "まとまりの前期比", "まとまりの年間比", "まとまりの傾向",
+              "患者の前期比", "患者の年間比", "患者の傾向"} & PlanCols & PatCols & SuiCols & {"まとまり内で最多",
               "不動品リスト", "システム不動日数", "システム最終払出日", "システム在庫", "薬価", "YJコード"}),
     Ren = Table.RenameColumns(Out, {{"製剤_表示", "製剤"}, {"区分_切替", "区分"}, {"まとまり払出", "まとまりの直近1日平均払出"}}),
     Typed = Table.TransformColumnTypes(Ren, {
@@ -303,6 +373,11 @@ let
               {"切替先", type text}, {"切替元", type text}, {"切替元の在庫", type number},
               {"まとまりの直近1日平均払出", type number}, {"切替の使い切り日数", type number},
               {"まとまりの品目数", Int64.Type}, {"発注先", type text}, {"まとまりのずれの割合", Percentage.Type},
+              {"前期比", type number}, {"年間比", type number}, {"傾向", type text},
+              {"まとまりの前期比", type number}, {"まとまりの年間比", type number}, {"まとまりの傾向", type text},
+              {"患者の前期比", type number}, {"患者の年間比", type number}, {"患者の傾向", type text},
+              {"前の月平均患者数", type number}, {"年間の月平均患者数", type number},
+              {"前の払出合計", type number}, {"直近のずれの割合", Percentage.Type},
               {"直近の月平均患者数", type number}, {"稼働四半期数", Int64.Type},
               {"予定日数", Int64.Type}, {"予定数量合計", type number}, {"予定患者数合計", type number},
               {"最終予定日", type date}, {"平均間隔", type number}, {"ばらつき（CV²）", type number},

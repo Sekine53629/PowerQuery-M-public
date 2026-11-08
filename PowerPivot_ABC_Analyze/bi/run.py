@@ -44,7 +44,8 @@ def r1_abc(model, settings, abc_m):
                          直近の払出=now["払出"], 構成比=now["構成比"], 累積=now["累積"], 月平均払出=now["月平均払出"], 量の区分=now["量の区分"],
                          患者の最少月=now["患者の最少月"], 今月の区分=now["区分"], 前月の区分=before,
                          変更=("" if before in (None, now["区分"]) else f"{before}→{now['区分']}"),
-                         在庫日数=r["在庫日数"], 需要の型=r["需要の型"], 最終在庫=r["最終在庫"]))
+                         在庫日数=r["在庫日数"], 需要の型=r["需要の型"], 最終在庫=r["最終在庫"],
+                         傾向=r.get("まとまりの傾向"), 年間比=r.get("まとまりの年間比"), 患者の傾向=r.get("患者の傾向")))
     out = pd.DataFrame(rows)
     return out.sort_values(["累積", "需要のまとまり", "薬品名"]).reset_index(drop=True)
 
@@ -143,6 +144,8 @@ def r5_order(model, settings):
     from model import calendar
     S = settings
     gap_r, near = S.num("ずれの注意割合"), S.num("期限切迫の日数")
+    n_txt = str(int(S.num("直近の月数")))
+    pct = lambda x: "－" if (x is None or (isinstance(x, float) and math.isnan(x))) else f"{fmt0(x * 100)}%"
     # 来週の予定・患者・在庫（一番新しい日の発注残込み）
     fcg = {}
     fc = model.予測データ
@@ -227,11 +230,16 @@ def r5_order(model, settings):
         if sw_to: notes.append("切替元（在庫を使い切る）" if pooled else f"切替元（「{sw_to}」へ寄せる。在庫を使い切る）")
         if sw_from: notes.append("切替先（切替元の在庫は合算済み）" if pooled else f"切替先（切替元の在庫 {fmt0(g('切替元の在庫'))} を使い切るまで控えめに）")
         if over: notes.append(f"上限を超える（在庫＋目安 {fmt0(gs + oq)} ＞ {fmt0(mq)}）")
+        trend = g("まとまりの傾向") if pooled else g("傾向")
+        tr1 = g("まとまりの前期比") if pooled else g("前期比")
+        tr2 = g("まとまりの年間比") if pooled else g("年間比")
+        trend_notes = ([f"{trend}傾向（直近 {n_txt} ヶ月は前の {n_txt} ヶ月の {pct(tr1)}、年間の {pct(tr2)}。患者は {g('患者の傾向') or '不明'}）。"
+                        f"目安を{'増やす' if trend == '増加' else '減らす'}か検討"] if trend in ("増加", "減少") else [])
         pool_notes = [] if not pooled else (
             [f"まとまり「{g('需要のまとまり')}」の発注先（{int(g('まとまりの品目数'))} 品目の {grp_txt}）"] if target
             else [f"「{tgt}」に寄せる（まとまり「{g('需要のまとまり')}」：{grp_txt}）"])
         note_other = "、".join(notes)
-        note = "、".join(pool_notes + notes)
+        note = "、".join(pool_notes + trend_notes + notes)
         verdict = ("寄せる" if (pooled and not target) else "発注しない" if no_order
                    else "控えめに" if (oq > 0 and careful) else "発注する" if oq > 0 else "不要")
         if not (gp > 0 or short > 0 or note_other or cls == "A"):
@@ -240,11 +248,12 @@ def r5_order(model, settings):
         rows.append(dict(区分=cls, 略称=g("略称"), 薬品名=n, 来週の予定=plan, 来週の患者=pats, 在庫=stock,
                          需要のまとまり=(g("需要のまとまり") if pooled else None),
                          まとまりの予定=(g_plan[k] if pooled else None), まとまりの在庫=(g_stock[k] if pooled else None),
-                         不足=(short if target else None), ずれ=gap, 見込み=(float(round(exp)) if target else None), 発注の目安=oq,
+                         不足=(short if target else None), ずれ=gap, 傾向=(trend if trend in ("増加", "減少") else None),
+                         見込み=(float(round(exp)) if target else None), 発注の目安=oq,
                          必要な最大在庫=(mq if target else None), 最大の期間=period, 判定=verdict, 注意=note,
                          並び=order_of.get(cls, 5), 並び略=((abbr_of.get(tgt) if pooled else g("略称")) or ""), キー=k, 並び先=(0 if target else 1)))
     cols = ["区分", "略称", "薬品名", "来週の予定", "来週の患者", "在庫", "需要のまとまり", "まとまりの予定", "まとまりの在庫",
-            "不足", "ずれ", "見込み", "発注の目安", "必要な最大在庫", "最大の期間", "判定", "注意"]
+            "不足", "ずれ", "傾向", "見込み", "発注の目安", "必要な最大在庫", "最大の期間", "判定", "注意"]
     if not rows:
         return pd.DataFrame(columns=cols)
     df = pd.DataFrame(rows).sort_values(["並び", "並び略", "キー", "並び先", "薬品名"]).reset_index(drop=True)
