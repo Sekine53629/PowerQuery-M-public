@@ -8,6 +8,8 @@
 //      徐放錠・CR錠・SRカプセルなどの徐放系は「成分徐放 規格」、腸溶錠は「成分腸溶 規格」で別のまとまり。
 //      フィルムコーティング錠は普通の錠（ODフィルム・フィルム剤とは別物）
 //      散・顆粒・細粒・末 は「成分散剤 規格」、内用液・シロップ・液 は「成分液剤 規格」で同じまとまり（変更調剤の イ・ウ）。
+//      内服のまとまりでは成分名の末尾の塩・エステル（塩酸塩・マレイン酸塩・酒石酸塩・酪酸エステル・ナトリウム／Na など）を外して結ぶ
+//      （後発品の名前では省かれることが多い。0.11.0）。外用は残す。成分（案）・成分規格 は表記どおり
 //      ドライシロップと外用（点眼液・外用液・テープなど）は剤形を残して別のまとまり
 //    ・規格の読み取り（0.10.1）：㎎・㎍・㎖ のような 1 文字の単位と大文字小文字をそろえる（25㎎・25MG → 25mg）。
 //      数字が複数あるときは単位の付いたものを優先（「錠7.5 7.5mg」→ 7.5mg）、剤形が数字の後ろでも読む（「1%点眼液 5mL」→ 1%）。
@@ -43,6 +45,16 @@ let
     BrandNames = List.Buffer(List.Sort(BrandTbl[先発名], (a, b) => Value.Compare(Text.Length(b), Text.Length(a)))),
     BrandOf  = (ingr as text) as nullable text => List.First(List.Select(BrandNames, (b) => Text.StartsWith(ingr, b)), null),
     IngrOf   = (b as text) as text => BrandTbl{[先発名 = b]}[成分名],
+
+    // まとまりのキーでは、成分名の末尾の塩・エステルの表記を外す（後発品の名前では省かれることが多い。例：ゾルピデム酒石酸塩 → ゾルピデム）。
+    // 内服（錠剤系・散剤系・液剤系・徐放系・腸溶系）だけ。外用はエステルで薬が変わる（ステロイドなど）ので残す。成分（案）・成分規格 は表記どおり
+    SaltSuffix = {"酪酸エステルプロピオン酸エステル", "プロピオン酸エステル", "吉草酸エステル", "酪酸エステル", "酢酸エステル", "リン酸エステル", "エステル",
+                  "臭化水素酸塩", "マレイン酸塩", "酒石酸塩", "クエン酸塩", "フマル酸塩", "メシル酸塩", "ベシル酸塩", "シュウ酸塩", "コハク酸塩", "トシル酸塩",
+                  "パモ酸塩", "塩酸塩", "硫酸塩", "硝酸塩", "リン酸塩", "酢酸塩", "二カリウム", "ナトリウム", "カリウム", "カルシウム", "マグネシウム",
+                  "塩化物", "臭化物", "水和物", "Na"},
+    StripSalt = (t as text) as text =>
+        let hit = List.First(List.Select(SaltSuffix, (sfx) => Text.EndsWith(t, sfx) and Text.Length(t) - Text.Length(sfx) >= 3), null)
+        in  if hit = null then t else @StripSalt(Text.Start(t, Text.Length(t) - Text.Length(hit))),
     Clean = (v as any) as nullable text => if v = null then null else let t = Text.Trim(Text.From(v)) in if t = "" then null else t,
     F     = (n as nullable number) as text => if n = null then "" else Number.ToText(Number.Round(n, 0), "N0", "ja-JP"),
 
@@ -134,12 +146,13 @@ let
             // 屋号のない薬は先発名の表で成分名を引く（先頭一致）。引けたら成分名で結ぶ
             brand0 = if brand = null and ingr0 <> "" then BrandOf(ingr0) else null,
             ingr   = if brand0 = null then ingr0 else IngrOf(brand0),
+            key    = if ingr = "" then "" else StripSalt(ingr),
             grp    = if ingr = "" or not okStr or form = null then null
-                     else if List.Contains(TabletForms, form) then ingr & " " & str0
-                     else if List.Contains(SlowForms, form) then ingr & "徐放 " & str0
-                     else if List.Contains(EntericForms, form) then ingr & "腸溶 " & str0
-                     else if List.Contains(PowderForms, form) then ingr & "散剤 " & str0
-                     else if List.Contains(LiquidForms, form) then ingr & "液剤 " & str0
+                     else if List.Contains(TabletForms, form) then key & " " & str0
+                     else if List.Contains(SlowForms, form) then key & "徐放 " & str0
+                     else if List.Contains(EntericForms, form) then key & "腸溶 " & str0
+                     else if List.Contains(PowderForms, form) then key & "散剤 " & str0
+                     else if List.Contains(LiquidForms, form) then key & "液剤 " & str0
                      else ingr & form & " " & str0,
             spec   = if ingr = "" then null else ingr & (form ?? "") & (if okStr then str0 else ""),
             conf   = if brand <> null and form <> null and okStr then "後発（屋号あり）"

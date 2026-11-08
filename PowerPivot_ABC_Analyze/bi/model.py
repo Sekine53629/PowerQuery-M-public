@@ -588,6 +588,19 @@ TABLET_FORMS = {"口腔内崩壊錠", "フィルムコーティング錠", "フ�
                 "配合OD錠", "配合錠", "配合カプセル", "ODフィルム", "OD錠", "D錠", "錠", "ソフトカプセル", "カプセル", "フィルム", "丸"}
 POWDER_FORMS = {"配合顆粒", "配合散", "散", "顆粒", "細粒", "末"}
 MARKS = "★☆※◎○●◆◇▲△▼▽■□ 　"
+# まとまりのキーで外す、成分名の末尾の塩・エステル（内服だけ。外用は残す）
+SALT_SUFFIX = ["酪酸エステルプロピオン酸エステル", "プロピオン酸エステル", "吉草酸エステル", "酪酸エステル", "酢酸エステル", "リン酸エステル", "エステル",
+               "臭化水素酸塩", "マレイン酸塩", "酒石酸塩", "クエン酸塩", "フマル酸塩", "メシル酸塩", "ベシル酸塩", "シュウ酸塩", "コハク酸塩", "トシル酸塩",
+               "パモ酸塩", "塩酸塩", "硫酸塩", "硝酸塩", "リン酸塩", "酢酸塩", "二カリウム", "ナトリウム", "カリウム", "カルシウム", "マグネシウム",
+               "塩化物", "臭化物", "水和物", "Na"]
+
+
+def strip_salt(t):
+    while True:
+        hit = next((s for s in SALT_SUFFIX if t.endswith(s) and len(t) - len(s) >= 3), None)
+        if hit is None:
+            return t
+        t = t[:-len(hit)]
 LIQUID_FORMS = {"内用液", "シロップ", "液"}
 SLOW_FORMS = {"徐放カプセル", "徐放錠", "CR錠", "CRカプセル", "SR錠", "SRカプセル", "LA錠", "LAカプセル", "ER錠", "XR錠", "R錠"}
 ENTERIC_FORMS = {"腸溶カプセル", "腸溶錠"}
@@ -682,18 +695,19 @@ def parse_drug_name(name):
     # 屋号のない薬は先発名の表で成分名を引く（先頭一致、長い名前から）
     brand0 = next((b for b in BRAND_NAMES if ingr0.startswith(b)), None) if (brand is None and ingr0) else None
     ingr = BRAND_MAP[brand0] if brand0 else ingr0
+    key = strip_salt(ingr) if ingr else ""
     if not ingr or not ok_str or form is None:
         grp = None
     elif form in TABLET_FORMS:
-        grp = f"{ingr} {str0}"
+        grp = f"{key} {str0}"
     elif form in SLOW_FORMS:
-        grp = f"{ingr}徐放 {str0}"
+        grp = f"{key}徐放 {str0}"
     elif form in ENTERIC_FORMS:
-        grp = f"{ingr}腸溶 {str0}"
+        grp = f"{key}腸溶 {str0}"
     elif form in POWDER_FORMS:
-        grp = f"{ingr}散剤 {str0}"
+        grp = f"{key}散剤 {str0}"
     elif form in LIQUID_FORMS:
-        grp = f"{ingr}液剤 {str0}"
+        grp = f"{key}液剤 {str0}"
     else:
         grp = f"{ingr}{form} {str0}"
     spec = None if not ingr else f"{ingr}{form or ''}{str0 if ok_str else ''}"
