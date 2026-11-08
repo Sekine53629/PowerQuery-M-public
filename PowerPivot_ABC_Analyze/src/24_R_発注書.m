@@ -7,7 +7,13 @@
 //        当月の予測データには月末までの予定が入っている。週が翌月にかかるときは翌月のファイルも置く
 //    ・在庫：予測データの一番新しい日の 在庫数量（発注残を含む）。予測に出ない薬は M_薬品 の最終在庫（出納の最終月。参考）
 //    ・ずれ：M_薬品 の ずれの割合（1 年の 払出 ÷ 予定 − 1）。見込み ＝ 来週の予定 × (1 ＋ ずれ)（0 未満にはしない）
-//    ・不足 ＝ 来週の予定 − 在庫（マイナスは 0）。発注の目安 ＝ 見込み − 在庫 を切り上げ（錠。箱への切り上げは現場）
+//    ・不足 ＝ 来週の予定 − 在庫（マイナスは 0）
+//    【発注の考え方】（0.12.0。区分ごとに発注の目安の出し方を変える。利用者の決定）
+//        A「上限まで」  ：必要な最大在庫 − 在庫（連休でも不足しない上限まで埋める）。1 年の予定がなく上限が 0 なら C と同じ
+//        B「1.5倍を在庫」：見込み × 設定「区分Bの倍率」(1.5) − 在庫（予測処方量の 1.5 倍を在庫する差分）
+//        C「必要量」    ：見込み − 在庫（必要量をぎりぎり上回る量）。区分のない薬も同じ
+//        D「人が判断」  ：目安は C と同じ数を参考に出し、判定「要判断」。不足しても発注するかは使う人が決める
+//        切り上げは錠単位（箱への切り上げは現場）。まとまりは発注先の薬の区分で決める
 //    ・必要な最大在庫：1 年の日次の予定を「納品と納品の間」（注文は翌営業日に届くとして、同じ次の納品日を持つ日々）で
 //        区切った合計のいちばん大きいもの × (1 ＋ ずれ)。連休でも不足しない在庫の上限の目安（区分 A の薬の管理用）。
 //        卸の営業日は ④ fx_卸の休み（土日・祝日・年末年始・追加休業日）
@@ -19,8 +25,8 @@
 //        ・まとまりに登録のない薬、屋号が 1 つだけのまとまりは、これまでどおり薬ごとに計算する
 //    ・判定：発注しない ＝ 発注除外／供給状況が 供給停止・薬価削除予定／切替元（薬品グループの 切替先 あり。0.7.0）（目安は 0）
 //            寄せる     ＝ まとまりの発注先でない屋号（0.9.0）（目安は 0）
-//            控えめに   ＝ 区分 D／経過措置品／供給状況 限定／予定より「ずれの注意割合」以上少なく出る薬／
-//                         切替先（まとまりで合算していないとき）で、目安 > 0
+//            要判断     ＝ 区分 D で目安 > 0（0.12.0。発注するかは使う人が決める）
+//            控えめに   ＝ 経過措置品／供給状況 限定／予定より「ずれの注意割合」以上少なく出る薬／切替先（まとまりで合算していないとき）で、目安 > 0
 //            発注する   ＝ それ以外で目安 > 0　　不要 ＝ 目安 0
 //    ・注意：限定出荷／出荷調整の疑い（⑬ G01・G02）／期限の近いロットを先に使う（⑭ 残り日数 ≦ 期限切迫の日数 か 返す量 > 0）／
 //            予定より n% 少なく出る／患者が少ない（区分 D）／経過措置品／予定にない薬／上限を超える（区分 A で 在庫＋目安 > 必要な最大在庫）／
@@ -28,8 +34,8 @@
 //    【傾向】（0.10.0）M_薬品 の 傾向（まとまりなら まとまりの傾向）が 増加／減少 の薬は、列「傾向」に出し、注意に
 //        「減少傾向（直近 N ヶ月は前の N ヶ月の a%、年間の b%。患者は …）。目安を減らすか検討」のように書く。
 //        発注の目安の計算は変えない（予定 × 年間のずれ のまま）。増減の判断と量の調整は使う人に委ねる
-//    ・載せる薬：来週の予定か不足があるか（まとまりならその合計で見る）、注意（寄せる・傾向の注意を除く）があるか、
-//        区分 A（上限の確認のため常に載せる）。在庫が足りて注意もない薬は載せない。まとまりは発注先と屋号の行が並ぶ
+//    ・載せる薬：発注の目安 > 0 か 不足 > 0 の薬だけ（まとまりはその合計で見る。0.12.0：発注の要らない薬は載せない）。
+//        発注しない・寄せる の薬も、不足があれば載せる（不足していても発注しないことが分かるように）
 //    ・区分の列でオートフィルターをかければ、区分ごとに印刷できる
 // ================================================================================
 let
@@ -38,6 +44,7 @@ let
                let v = Record.FieldOrDefault(Prm, key, null)
                in  if v = null or (v is text and Text.Trim(v) = "") then dflt else Number.From(v),
     GapRate = Num("ずれの注意割合", 0.3),
+    BMult   = Num("区分Bの倍率", 1.5),
     RecentN = Text.From(Number.RoundDown(Num("直近の月数", 3))),
     P       = (x as nullable number) as text => if x = null then "－" else Number.ToText(Number.Round(x * 100, 0), "N0", "ja-JP") & "%",
     Near    = Num("期限切迫の日数", 180),
@@ -61,6 +68,9 @@ let
              {"来週の予定", "来週の患者", "在庫_予測"}),
     J1s = Table.AddColumn(J1, "在庫_薬", each [在庫_予測] ?? [最終在庫] ?? 0, type number),
     Abbr = Table.Buffer(Table.SelectColumns(Drugs, {"薬品名", "略称"})),
+    // まとまりの発注の考え方・判定は、発注先の薬の区分・発注除外・供給状況・切替・経過措置で決める
+    TgtTbl = Table.Buffer(Table.SelectColumns(Drugs, {"薬品名", "区分", "発注除外", "供給状況", "切替先", "経過措置"})),
+    TgtOf  = (n as nullable text) as nullable record => if n = null then null else try TgtTbl{[薬品名 = n]} otherwise null,
     AbbrOf = (n as nullable text) as nullable text =>
                  if n = null then null else try Abbr{[薬品名 = n]}[略称] otherwise null,
 
@@ -110,6 +120,7 @@ let
         let
             pooled  = r[発注先] <> null,                       // まとまりで合算する薬（屋号が 2 つ以上）
             target  = not pooled or r[発注先] = r[薬品名],      // 発注の目安を出す行
+            t       = if pooled then (TgtOf(r[発注先]) ?? r) else r,   // 発注の考え方・判定を決める薬（まとまりなら発注先）
             plan    = r[来週の予定] ?? 0,
             pats    = r[来週の患者] ?? 0,
             stock   = r[在庫_薬],
@@ -121,12 +132,23 @@ let
             short   = List.Max({0, gPlan - gStock}),
             maxQ    = Number.RoundUp(Number.Round((r[最大の期間の量] ?? 0) * factor, 6)),
             cls     = r[区分],
+            tcls    = t[区分],
             sup     = r[供給状況],
             excl    = r[発注除外] = true,
-            noOrder = excl or sup = "供給停止" or sup = "薬価削除予定" or r[切替先] <> null,
-            careful = cls = "D" or r[経過措置] = true or sup = "限定" or gap <= -GapRate or (r[切替元] <> null and not pooled),
-            oq      = if noOrder or not target then 0 else Number.RoundUp(Number.Round(List.Max({0, exp - gStock}), 6)),
-            overCap = target and cls = "A" and maxQ > 0 and gStock + oq > maxQ,
+            noOrder = t[発注除外] = true or t[供給状況] = "供給停止" or t[供給状況] = "薬価削除予定" or t[切替先] <> null,
+            careful = t[経過措置] = true or t[供給状況] = "限定" or gap <= -GapRate or (r[切替元] <> null and not pooled),
+            // 発注の考え方（区分ごと）
+            Up      = (x as number) as number => Number.RoundUp(Number.Round(List.Max({0, x}), 6)),
+            need    = Up(exp - gStock),                                   // C：見込み − 在庫
+            policy  = if tcls = "A" and maxQ > 0 then "上限まで"
+                      else if tcls = "B" then Text.From(BMult) & "倍を在庫"
+                      else if tcls = "D" then "人が判断" else "必要量",
+            oqP     = if tcls = "A" and maxQ > 0 then Up(maxQ - gStock)
+                      else if tcls = "B" then Up(exp * BMult - gStock)
+                      else need,
+            oqG     = if noOrder then 0 else oqP,                          // まとまり（薬）としての目安
+            oq      = if target then oqG else 0,
+            overCap = target and tcls = "A" and maxQ > 0 and gStock + oq > maxQ,
             grpTxt  = "予定 " & F(r[まとまりの予定]) & "・在庫 " & F(r[まとまりの在庫]) & " を合算",
             notes   = List.RemoveNulls({
                           if excl then "発注除外" else null,
@@ -152,10 +174,10 @@ let
             poolNotes = if not pooled then {}
                         else if target then {"まとまり「" & r[需要のまとまり] & "」の発注先（" & Text.From(r[まとまりの品目数]) & " 品目の " & grpTxt & "）"}
                         else {"「" & r[発注先] & "」に寄せる（まとまり「" & r[需要のまとまり] & "」：" & grpTxt & "）"},
-            noteOther = Text.Combine(notes, "、"),
             note    = Text.Combine(poolNotes & trendNotes & notes, "、"),
             verdict = if pooled and not target then "寄せる"
                       else if noOrder then "発注しない"
+                      else if oq > 0 and tcls = "D" then "要判断"
                       else if oq > 0 and careful then "控えめに"
                       else if oq > 0 then "発注する" else "不要",
             period  = if r[期間始] = null then ""
@@ -171,25 +193,26 @@ let
              不足 = if target then short else null, ずれ = gap,
              傾向 = if trend = "増加" or trend = "減少" then trend else null,
              見込み = if target then Number.Round(exp, 0) else null,
+             発注の考え方 = policy,
              発注の目安 = oq,
              必要な最大在庫 = if target then maxQ else null,
              最大の期間 = if target then period else "",
              判定 = verdict, 注意 = note,
-             載せる = gPlan > 0 or short > 0 or noteOther <> "" or cls = "A",
+             載せる = oqG > 0 or short > 0,
              並び = order, 並び略 = sortAb, 並び先 = if target then 0 else 1]),
     // 計算の中の 来週の予定・来週の患者・傾向 は M_薬品／J1 の列と同じ名前なので、先に外してから広げる
     E    = Table.ExpandRecordColumn(Table.RemoveColumns(Calc, {"来週の予定", "来週の患者", "在庫_予測", "在庫_薬",
                "まとまりの予定", "まとまりの患者", "まとまりの在庫", "傾向"}), "計算",
-               {"来週の予定", "来週の患者", "在庫", "需要のまとまり_表示", "まとまりの予定_表示", "まとまりの在庫_表示", "不足", "ずれ", "傾向", "見込み",
+               {"来週の予定", "来週の患者", "在庫", "需要のまとまり_表示", "まとまりの予定_表示", "まとまりの在庫_表示", "不足", "ずれ", "傾向", "見込み", "発注の考え方",
                 "発注の目安", "必要な最大在庫", "最大の期間", "判定", "注意", "載せる", "並び", "並び略", "並び先"}),
     Sel  = Table.SelectRows(E, each [載せる]),
-    Out  = Table.SelectColumns(Sel, {"区分", "略称", "薬品名", "来週の予定", "来週の患者", "在庫",
+    Out  = Table.SelectColumns(Sel, {"区分", "発注の考え方", "略称", "薬品名", "来週の予定", "来週の患者", "在庫",
                "需要のまとまり_表示", "まとまりの予定_表示", "まとまりの在庫_表示", "不足", "ずれ", "傾向", "見込み",
                "発注の目安", "必要な最大在庫", "最大の期間", "判定", "注意", "まとまりキー", "並び", "並び略", "並び先"}),
     Ren  = Table.RenameColumns(Out, {{"需要のまとまり_表示", "需要のまとまり"}, {"まとまりの予定_表示", "まとまりの予定"},
                {"まとまりの在庫_表示", "まとまりの在庫"}}),
     Typed = Table.TransformColumnTypes(Ren, {
-               {"区分", type text}, {"略称", type text}, {"薬品名", type text}, {"来週の予定", type number},
+               {"区分", type text}, {"発注の考え方", type text}, {"略称", type text}, {"薬品名", type text}, {"来週の予定", type number},
                {"来週の患者", type number}, {"在庫", type number}, {"需要のまとまり", type text},
                {"まとまりの予定", type number}, {"まとまりの在庫", type number},
                {"不足", type number}, {"ずれ", Percentage.Type}, {"傾向", type text},
