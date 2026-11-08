@@ -578,11 +578,23 @@ def fmt0(n):
 # ------------------------------------------------------------------------------
 # 薬品グループ案（㉕）：薬品名を 成分＋剤形＋規格「屋号」 に分解して、需要のまとまりの案を出す（0.7.0）
 # ------------------------------------------------------------------------------
-FORMS = ["口腔内崩壊錠", "フィルムコーティング錠", "チュアブル錠", "徐放錠", "腸溶錠", "糖衣錠", "OD錠", "錠",
-         "カプセル", "ドライシロップ", "シロップ", "点眼液", "点鼻液", "吸入液", "内用液", "液",
-         "細粒", "顆粒", "散", "テープ", "パップ", "ゲル", "軟膏", "クリーム", "ローション", "坐剤", "注"]
-TABLET_FORMS = {"口腔内崩壊錠", "フィルムコーティング錠", "チュアブル錠", "徐放錠", "腸溶錠", "糖衣錠", "OD錠", "錠", "カプセル"}
-UNIT_CHARS = set("0123456789.mgμµLl%/単位")
+FORMS = ["口腔内崩壊錠", "フィルムコーティング錠", "フィルムコート錠", "チュアブル錠", "ザイディス錠", "ザイディス",
+         "徐放カプセル", "徐放錠", "腸溶カプセル", "腸溶錠", "糖衣錠", "舌下錠", "バッカル錠",
+         "ODフィルム", "OD錠", "D錠", "CR錠", "CRカプセル", "SR錠", "SRカプセル", "LA錠", "LAカプセル", "ER錠", "XR錠", "R錠", "錠",
+         "ソフトカプセル", "カプセル", "フィルム", "ドライシロップ", "シロップ", "点眼液", "点鼻液", "吸入液", "外用液", "内用液", "液",
+         "細粒", "顆粒", "散", "末", "丸", "トローチ", "テープ", "パップ", "ゲル", "軟膏", "クリーム", "ローション", "坐剤", "注"]
+TABLET_FORMS = {"口腔内崩壊錠", "フィルムコーティング錠", "フィルムコート錠", "チュアブル錠", "ザイディス錠", "ザイディス", "糖衣錠",
+                "ODフィルム", "OD錠", "D錠", "錠", "ソフトカプセル", "カプセル", "フィルム", "丸"}
+POWDER_FORMS = {"散", "顆粒", "細粒", "末"}
+LIQUID_FORMS = {"内用液", "シロップ", "液"}
+SLOW_FORMS = {"徐放カプセル", "徐放錠", "CR錠", "CRカプセル", "SR錠", "SRカプセル", "LA錠", "LAカプセル", "ER錠", "XR錠", "R錠"}
+ENTERIC_FORMS = {"腸溶カプセル", "腸溶錠"}
+LETTERS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+NUM_CHARS = set("0123456789.,")
+SUF_CHARS = LETTERS | set("μ%/単位個万千")
+UNIT_LETTERS = LETTERS | set("μ%単個")
+UNIT_MAP = [("㎎", "mg"), ("㎍", "μg"), ("㎖", "mL"), ("㎕", "μL"), ("㎏", "kg"), ("㎜", "mm"), ("㎝", "cm"), ("µ", "μ")]
+UNIT_FIX = [("ml", "mL"), ("mcg", "μg"), ("ug", "μg"), ("iu", "IU"), ("meq", "mEq")]
 CLOSERS = {"]": "[", ")": "(", "）": "（", "】": "【", "〕": "〔"}
 
 
@@ -596,27 +608,64 @@ def _strip_tail(s):
     return s
 
 
+def _canon_unit(u):
+    u = u.lower()
+    for a_, b_ in UNIT_FIX:
+        u = u.replace(a_, b_)
+    return u
+
+
+def _runs(core):
+    """名前の中の「数字＋単位」の並び（位置・数・単位・単位あり）。前が数字のもの（7.5 の 5）は拾わない"""
+    out = []
+    for i, c in enumerate(core):
+        if not c.isdigit() or (i > 0 and core[i - 1] in NUM_CHARS):
+            continue
+        j = i
+        while j < len(core) and core[j] in NUM_CHARS:
+            j += 1
+        k = j
+        while k < len(core) and core[k] in SUF_CHARS:
+            k += 1
+        n = core[i:j].rstrip(".,").replace(",", "")
+        u = _canon_unit(core[j:k].rstrip("/."))
+        out.append(dict(位置=i, 数=n, 単位=u, 単位あり=any(ch in UNIT_LETTERS for ch in u)))
+    return out
+
+
 def parse_drug_name(name):
-    """戻り値：成分案／剤形／規格／屋号／成分規格案／まとまり案／先発後発案／確からしさ（㉕ と同じ決まり）"""
+    """戻り値：成分案／剤形／規格／屋号／成分規格案／まとまり案／先発後発案／確からしさ（㉕ と同じ決まり。0.10.1）"""
     n0 = nz(name) or ""
+    for a_, b_ in UNIT_MAP:
+        n0 = n0.replace(a_, b_)
     has_b = "「" in n0 and "」" in n0
     brand = n0[n0.index("「") + 1:n0.index("」")].strip() if has_b else None
     core = _strip_tail(n0[:n0.index("「")] if has_b else n0)
-    dpos = next((i for i, c in enumerate(core) if c.isdigit()), -1)
-    run = ""
-    if dpos >= 0:
-        for c in core[dpos:]:
-            if c in UNIT_CHARS:
-                run += c
-            else:
-                break
-    str0 = run.rstrip("/.").replace("µ", "μ")
-    ok_str = bool(str0) and any(c.isdigit() for c in str0) and str0 != "".join(c for c in str0 if c.isdigit() or c == ".")
-    head = (core if dpos < 0 else core[:dpos]).strip()
-    form = next((f for f in FORMS if head.endswith(f)), None)
-    ingr = (head[:-len(form)] if form else head).replace(" ", "").replace("　", "")
-    tablet = form is not None and form in TABLET_FORMS
-    grp = None if (not ingr or not ok_str or form is None) else (f"{ingr} {str0}" if tablet else f"{ingr}{form} {str0}")
+    form = next((f for f in FORMS if f in core), None)
+    f_pos = core.index(form) if form else -1
+    runs = _runs(core)
+    with_u = [r for r in runs if r["単位あり"]]
+    after_f = [] if form is None else [r for r in runs if r["位置"] == f_pos + len(form)]
+    pick = with_u[0] if with_u else (after_f[0] if after_f else None)
+    str0 = None if pick is None else pick["数"] + pick["単位"]
+    ok_str = pick is not None
+    d_pos = pick["位置"] if pick else -1
+    cuts = [x for x in (f_pos, d_pos) if x >= 0]
+    ingr = (core if not cuts else core[:min(cuts)]).replace(" ", "").replace("　", "")
+    if not ingr or not ok_str or form is None:
+        grp = None
+    elif form in TABLET_FORMS:
+        grp = f"{ingr} {str0}"
+    elif form in SLOW_FORMS:
+        grp = f"{ingr}徐放 {str0}"
+    elif form in ENTERIC_FORMS:
+        grp = f"{ingr}腸溶 {str0}"
+    elif form in POWDER_FORMS:
+        grp = f"{ingr}散剤 {str0}"
+    elif form in LIQUID_FORMS:
+        grp = f"{ingr}液剤 {str0}"
+    else:
+        grp = f"{ingr}{form} {str0}"
     spec = None if not ingr else f"{ingr}{form or ''}{str0 if ok_str else ''}"
     if brand is not None and form is not None and ok_str:
         conf = "後発（屋号あり）"

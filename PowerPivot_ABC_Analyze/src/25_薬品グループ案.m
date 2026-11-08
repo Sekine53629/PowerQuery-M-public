@@ -4,9 +4,16 @@
 //    ・後発品の名前は「成分名＋剤形＋規格「屋号」」で統一されているので、「屋号」を外せば 成分規格、
 //      剤形（錠・OD錠・カプセルなど）も外せば 需要のまとまり（成分＋規格）になる
 //        例：セルトラリン錠25mg「アメル」／セルトラリンOD錠25mg「トーワ」 → まとまり「セルトラリン 25mg」
-//    ・内用液・細粒・顆粒・外用は単位が違うので、剤形を残して別のまとまりにする
+//    ・剤形の扱い（0.10.1。利用者の指示）：錠・OD錠・D錠・口腔内崩壊錠・ザイディス・カプセル・フィルム（口腔内フィルム）は同じまとまり。
+//      徐放錠・CR錠・SRカプセルなどの徐放系は「成分徐放 規格」、腸溶錠は「成分腸溶 規格」で別のまとまり。
+//      フィルムコーティング錠は普通の錠（ODフィルム・フィルム剤とは別物）
+//      散・顆粒・細粒・末 は「成分散剤 規格」、内用液・シロップ・液 は「成分液剤 規格」で同じまとまり（変更調剤の イ・ウ）。
+//      ドライシロップと外用（点眼液・外用液・テープなど）は剤形を残して別のまとまり
+//    ・規格の読み取り（0.10.1）：㎎・㎍・㎖ のような 1 文字の単位と大文字小文字をそろえる（25㎎・25MG → 25mg）。
+//      数字が複数あるときは単位の付いたものを優先（「錠7.5 7.5mg」→ 7.5mg）、剤形が数字の後ろでも読む（「1%点眼液 5mL」→ 1%）。
+//      mg/mL・単位・万単位・個 も単位として読む
 //    ・先発品（屋号がない）は名前では結べない。「要確認」として残すので、成分名を見て手で同じまとまりに入れる
-//    ・漢方・OTC・「徐放錠A」のような変則の名前も「要確認」
+//    ・漢方・OTC のように剤形や規格のない名前は「要確認」（「徐放錠A200mg」のような形は 0.10.1 から読める）
 //    【載せる薬】（0.8.0）まとめる必要のある薬だけ。理由は列「載せた理由」
 //      ・同じまとまり（案）の薬が 2 つ以上ある（需要がかぶる後発どうし）
 //      ・経過措置（経過措置薬品リストか手入力の経過措置リスト）
@@ -25,13 +32,37 @@ let
     Clean = (v as any) as nullable text => if v = null then null else let t = Text.Trim(Text.From(v)) in if t = "" then null else t,
     F     = (n as nullable number) as text => if n = null then "" else Number.ToText(Number.Round(n, 0), "N0", "ja-JP"),
 
-    // 剤形（長いものから順に照合する）
-    Forms = {"口腔内崩壊錠", "フィルムコーティング錠", "チュアブル錠", "徐放錠", "腸溶錠", "糖衣錠", "OD錠", "錠",
-             "カプセル", "ドライシロップ", "シロップ", "点眼液", "点鼻液", "吸入液", "内用液", "液",
-             "細粒", "顆粒", "散", "テープ", "パップ", "ゲル", "軟膏", "クリーム", "ローション", "坐剤", "注"},
-    TabletForms = {"口腔内崩壊錠", "フィルムコーティング錠", "チュアブル錠", "徐放錠", "腸溶錠", "糖衣錠", "OD錠", "錠", "カプセル"},
+    // ---- 剤形（長いものから順に照合する。名前のどこにあってもよい）----
+    //   変更調剤で「類似する別剤形」とされる範囲（保医発0305第12号）を同じまとまりにする：
+    //     錠剤系（ア）：錠・OD錠・D錠・口腔内崩壊錠・ザイディス・チュアブル錠・糖衣錠・フィルムコーティング錠・カプセル・ソフトカプセル・丸、
+    //       利用者の指示で フィルム（口腔内フィルム。ODフィルム）も → まとまり「成分 規格」
+    //     散剤系（イ）：散・顆粒・細粒・末 → 「成分散剤 規格」　　液剤系（ウ）：内用液・シロップ・液 → 「成分液剤 規格」
+    //     ドライシロップは調剤の仕方で イ にも ウ にもなるので、まとめず剤形を残す（手で寄せる）
+    //   徐放系（別のまとまり「成分徐放 規格」）：徐放錠・徐放カプセル・CR錠・SR錠・SRカプセル・LA錠・ER錠・XR錠・R錠
+    //   腸溶系（別のまとまり「成分腸溶 規格」）：腸溶錠・腸溶カプセル
+    //   外用（点眼液・外用液・テープ・軟膏など）は変更調剤の対象外なので、剤形を残して別のまとまり
+    Forms = {"口腔内崩壊錠", "フィルムコーティング錠", "フィルムコート錠", "チュアブル錠", "ザイディス錠", "ザイディス",
+             "徐放カプセル", "徐放錠", "腸溶カプセル", "腸溶錠", "糖衣錠", "舌下錠", "バッカル錠",
+             "ODフィルム", "OD錠", "D錠", "CR錠", "CRカプセル", "SR錠", "SRカプセル", "LA錠", "LAカプセル", "ER錠", "XR錠", "R錠", "錠",
+             "ソフトカプセル", "カプセル", "フィルム", "ドライシロップ", "シロップ", "点眼液", "点鼻液", "吸入液", "外用液", "内用液", "液",
+             "細粒", "顆粒", "散", "末", "丸", "トローチ", "テープ", "パップ", "ゲル", "軟膏", "クリーム", "ローション", "坐剤", "注"},
+    TabletForms = {"口腔内崩壊錠", "フィルムコーティング錠", "フィルムコート錠", "チュアブル錠", "ザイディス錠", "ザイディス", "糖衣錠",
+                   "ODフィルム", "OD錠", "D錠", "錠", "ソフトカプセル", "カプセル", "フィルム", "丸"},
+    PowderForms = {"散", "顆粒", "細粒", "末"},
+    LiquidForms = {"内用液", "シロップ", "液"},
+    SlowForms   = {"徐放カプセル", "徐放錠", "CR錠", "CRカプセル", "SR錠", "SRカプセル", "LA錠", "LAカプセル", "ER錠", "XR錠", "R錠"},
+    EntericForms = {"腸溶カプセル", "腸溶錠"},
     Digits    = {"0" .. "9"},
-    UnitChars = {"0" .. "9", ".", "m", "g", "μ", "µ", "L", "l", "%", "/", "単", "位"},
+    Letters   = {"a" .. "z"} & {"A" .. "Z"},
+    NumChars  = Digits & {".", ","},
+    // 数字のあとに続く単位の文字（mg・μg・mL・%・単位・個・万単位・mg/mL など）
+    SufChars  = Letters & {"μ", "%", "/", "単", "位", "個", "万", "千"},
+    UnitLetters = Letters & {"μ", "%", "単", "個"},
+    // 単位の表記ゆれ：1 文字の単位（㎎ ㎍ ㎖ など）と µ を直してから読む。大文字小文字は読んだあとでそろえる
+    UnitMap   = {{"㎎", "mg"}, {"㎍", "μg"}, {"㎖", "mL"}, {"㎕", "μL"}, {"㎏", "kg"}, {"㎜", "mm"}, {"㎝", "cm"}, {"µ", "μ"}},
+    NormUnits = (t as text) as text => List.Accumulate(UnitMap, t, (acc, pr) => Text.Replace(acc, pr{0}, pr{1})),
+    UnitFix   = {{"ml", "mL"}, {"mcg", "μg"}, {"ug", "μg"}, {"iu", "IU"}, {"meq", "mEq"}},
+    CanonUnit = (u as text) as text => List.Accumulate(UnitFix, Text.Lower(u), (acc, pr) => Text.Replace(acc, pr{0}, pr{1})),
 
     // 末尾の [3g]・(医療用)・(旧) のようなかっこ書きを外す（繰り返し）
     StripTail = (t as text) as text =>
@@ -44,23 +75,50 @@ let
         in
             if p < 0 then s else @StripTail(Text.Start(s, p)),
 
+    // 名前の中の「数字＋単位」の並びを全部拾う（位置・数・単位）。前が数字のもの（7.5 の 5）は拾わない
+    Runs = (core as text) as list =>
+        let
+            chars  = Text.ToList(core),
+            starts = List.Select(List.Positions(chars), (i) =>
+                         List.Contains(Digits, chars{i}) and (i = 0 or not List.Contains(NumChars, chars{i - 1}))),
+            one    = (i as number) as record =>
+                let
+                    num  = List.FirstN(List.Skip(chars, i), (c) => List.Contains(NumChars, c)),
+                    rest = List.Skip(chars, i + List.Count(num)),
+                    suf  = List.FirstN(rest, (c) => List.Contains(SufChars, c)),
+                    n    = Text.Remove(Text.TrimEnd(Text.Combine(num), {".", ","}), {","}),
+                    u    = CanonUnit(Text.TrimEnd(Text.Combine(suf), {"/", "."}))
+                in
+                    [位置 = i, 数 = n, 単位 = u, 単位あり = List.ContainsAny(Text.ToList(u), UnitLetters)]
+        in
+            List.Transform(starts, one),
+
     Parse = (name as text) as record =>
         let
-            n0     = Nz(name),
+            n0     = NormUnits(Nz(name)),
             hasB   = Text.Contains(n0, "「") and Text.Contains(n0, "」"),
             brand  = if hasB then Text.Trim(Text.BetweenDelimiters(n0, "「", "」")) else null,
             core   = StripTail(if hasB then Text.BeforeDelimiter(n0, "「") else n0),
-            chars  = Text.ToList(core),
-            dpos   = List.PositionOfAny(chars, Digits),
-            run    = if dpos < 0 then {} else List.FirstN(List.Skip(chars, dpos), each List.Contains(UnitChars, _)),
-            str0   = Text.Replace(Text.TrimEnd(Text.Combine(run), {"/", "."}), "µ", "μ"),
-            okStr  = str0 <> "" and List.ContainsAny(Text.ToList(str0), Digits) and str0 <> Text.Select(str0, Digits & {"."}),
-            head   = Text.Trim(if dpos < 0 then core else Text.Start(core, dpos)),
-            form   = List.First(List.Select(Forms, (f) => Text.EndsWith(head, f)), null),
-            ingr   = Text.Remove(if form = null then head else Text.Start(head, Text.Length(head) - Text.Length(form)), {" ", "　"}),
-            tablet = form <> null and List.Contains(TabletForms, form),
+            form   = List.First(List.Select(Forms, (f) => Text.Contains(core, f)), null),
+            fPos   = if form = null then -1 else Text.PositionOf(core, form),
+            runs   = Runs(core),
+            // 規格：単位の付いた数字を優先。なければ剤形の直後の数字（「錠7.5」のような書き方）
+            withU  = List.Select(runs, (r) => r[単位あり]),
+            afterF = if form = null then {} else List.Select(runs, (r) => r[位置] = fPos + Text.Length(form)),
+            pick   = List.First(withU, null) ?? List.First(afterF, null),
+            str0   = if pick = null then null else pick[数] & pick[単位],
+            okStr  = pick <> null,
+            // 成分：剤形か規格の数字のどちらか早い方の手前まで（B12 のような成分の中の数字は切らない）
+            dPos   = if pick = null then -1 else pick[位置],
+            cut    = List.Min(List.RemoveNulls({if fPos >= 0 then fPos else null, if dPos >= 0 then dPos else null}), null),
+            ingr   = Text.Remove(if cut = null then core else Text.Start(core, cut), {" ", "　"}),
             grp    = if ingr = "" or not okStr or form = null then null
-                     else if tablet then ingr & " " & str0 else ingr & form & " " & str0,
+                     else if List.Contains(TabletForms, form) then ingr & " " & str0
+                     else if List.Contains(SlowForms, form) then ingr & "徐放 " & str0
+                     else if List.Contains(EntericForms, form) then ingr & "腸溶 " & str0
+                     else if List.Contains(PowderForms, form) then ingr & "散剤 " & str0
+                     else if List.Contains(LiquidForms, form) then ingr & "液剤 " & str0
+                     else ingr & form & " " & str0,
             spec   = if ingr = "" then null else ingr & (form ?? "") & (if okStr then str0 else ""),
             conf   = if brand <> null and form <> null and okStr then "後発（屋号あり）"
                      else if brand = null and form <> null and okStr then "要確認：屋号なし（先発か旧名称。成分名で結ぶ）"
