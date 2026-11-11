@@ -15,6 +15,8 @@
 //        結果      ：「読める…」「読まない：…」（対象外。理由つき）「読めない：…」（開けない・見出しがない。理由つき）
 //    ・3 つのリスト（期限切れ・経過措置・不動品）は、フォルダの中で一番新しい 1 つだけを読む
 //    ・出納の期間は、ファイルの中の日付（見出しより上）が優先。ここではファイル名の期間だけを見ている
+//    0.12.1：予測フォルダ（F の来週分）の行も出す。予測フォルダパスが空欄なら実績フォルダを来週の窓で調べる。
+//      ファイル名に年月がない予測データは「読める（…ファイル名に年月がないので、読む期間の年で日付を決める）」
 // ================================================================================
 let
     Prm  = #"設定値",
@@ -28,23 +30,32 @@ let
         else Text.TrimEnd(Text.Trim(Text.Remove(Text.From(v), {""""})), {"\", "/", " ", "　"}),
     S0 = Date.From(Prm[開始日]),
     E0 = Date.From(Prm[終了日]),
+    F0 = Date.From(Prm[予測開始]),
+    F1 = Date.From(Prm[予測終了]),
     Ymd = (d as date) as text => Date.ToText(d, "yyyy/MM/dd"),
     ExtOk = (e as text) as logical =>
         Text.StartsWith(Text.Lower(e), ".xls") or List.Contains({".csv", ".txt", ".tsv"}, Text.Lower(e)),
 
     KindPlan = "実績（薬品使用量）",
+    KindFc   = "予測（来週の薬品使用量）",
     KindSui  = "出納（数量一覧）",
+    FcPath   = CleanPath(Record.FieldOrDefault(Prm, "予測フォルダパス", null)),
     Targets = {
         [種類 = KindPlan, フォルダ = CleanPath(Prm[フォルダパス]), 目印 = Prm[先頭], 先頭一致 = true,
-         見出し = Norm(Prm[列名][薬品名]), 最新だけ = false],
+         見出し = Norm(Prm[列名][薬品名]), 最新だけ = false, 窓 = {S0, E0}, 注記 = null],
+        // F 発注書の来週分（予測開始～予測終了）。予測フォルダパスが空欄なら実績フォルダを読む（0.12.1 から確認に出す）
+        [種類 = KindFc, フォルダ = FcPath ?? CleanPath(Prm[フォルダパス]), 目印 = Prm[先頭], 先頭一致 = true,
+         見出し = Norm(Prm[列名][薬品名]), 最新だけ = false, 窓 = {F0, F1},
+         注記 = if FcPath = null then "設定の予測フォルダパスが空欄：実績フォルダの予測データから来週分（" & Ymd(F0) & " ～ " & Ymd(F1) & "）を読む"
+                else "予測フォルダ " & FcPath & " から来週分（" & Ymd(F0) & " ～ " & Ymd(F1) & "）を読む"],
         [種類 = KindSui, フォルダ = CleanPath(Prm[出納フォルダパス]), 目印 = Prm[出納の目印], 先頭一致 = false,
-         見出し = "品名", 最新だけ = false],
+         見出し = "品名", 最新だけ = false, 窓 = null, 注記 = null],
         [種類 = "期限切れリスト", フォルダ = CleanPath(Record.FieldOrDefault(Prm, "期限切迫フォルダパス", null)),
-         目印 = "期限切れ", 先頭一致 = false, 見出し = "品名", 最新だけ = true],
+         目印 = "期限切れ", 先頭一致 = false, 見出し = "品名", 最新だけ = true, 窓 = null, 注記 = null],
         [種類 = "経過措置薬品リスト", フォルダ = CleanPath(Record.FieldOrDefault(Prm, "経過措置フォルダパス", null)),
-         目印 = "経過措置", 先頭一致 = false, 見出し = "品名", 最新だけ = true],
+         目印 = "経過措置", 先頭一致 = false, 見出し = "品名", 最新だけ = true, 窓 = null, 注記 = null],
         [種類 = "不動品リスト", フォルダ = CleanPath(Record.FieldOrDefault(Prm, "不動品フォルダパス", null)),
-         目印 = "不動品", 先頭一致 = false, 見出し = "品名", 最新だけ = true]},
+         目印 = "不動品", 先頭一致 = false, 見出し = "品名", 最新だけ = true, 窓 = null, 注記 = null]},
 
     Row = (kind as text, nm as nullable text, modified as any, fmt as nullable text, nSheets as nullable number,
            hRow as nullable number, nRows as nullable number, result as text) as record =>
@@ -56,26 +67,28 @@ let
         try #date(Number.FromText(Text.Start(x, 4)), Number.FromText(Text.Middle(x, 4, 2)), Number.FromText(Text.End(x, 2)))
         otherwise null,
 
-    // 実績：ファイル名の年月が読む期間に入っているか、日付をどう決めるか
-    PlanNote = (nm as text, sheets as table, isText as logical, hasDay as logical) as text =>
+    // 実績・予測：ファイル名の年月が読む期間（win ＝ {開始, 終了}）に入っているか、日付をどう決めるか
+    PlanNote = (nm as text, sheets as table, isText as logical, hasDay as logical, win as list) as text =>
         let
+            s0    = win{0},
+            e0    = win{1},
             body  = Text.BeforeDelimiter(Text.AfterDelimiter(nm, Prm[先頭]), ".", {0, RelativePosition.FromEnd}),
             chars = Text.ToList(Nz(body)),
             from  = List.PositionOfAny(chars, {"0" .. "9"}),
             dg    = if from < 0 then ""
                     else Text.Combine(List.FirstN(List.Skip(chars, from), each List.Contains({"0" .. "9"}, _))),
             ym    = if Text.Length(dg) >= 6 then D8(Text.Start(dg, 6) & "01") else null,
-            inP   = ym <> null and ym >= Date.AddMonths(Date.StartOfMonth(S0), -1) and ym <= E0,
+            inP   = ym <> null and ym >= Date.AddMonths(Date.StartOfMonth(s0), -1) and ym <= e0,
             days  = List.Count(List.Select(sheets[シート名], each
-                        _ <> null and Text.Contains(_, "月") and Text.Contains(_, "日") and not Text.StartsWith(Nz(_), "期間")))
+                        _ <> null and Text.Contains(_, "月") and Text.Contains(_, "日") and not Text.StartsWith(Nz(_), "期間"))),
+            noYM  = if ym = null then "。ファイル名に年月がないので、読む期間の年で日付を決める" else ""
         in
-            if ym = null then "読まない：ファイル名に年月（yyyymm）がない"
-            else if not inP then "読まない：ファイルの年月（" & Date.ToText(ym, "yyyy/MM") & "）が読む期間の外"
+            if ym <> null and not inP then "読まない：ファイルの年月（" & Date.ToText(ym, "yyyy/MM") & "）が読む期間の外"
             else if isText and hasDay then "読める（「日付」の列で日ごとに分ける）"
             else if isText and Text.Length(dg) >= 8 then "読める（ファイル名の日付の 1 日分）"
             else if isText then "読まない：「日付」の列がなく、ファイル名に 8 桁の日付（yyyymmdd）もない"
             else if days = 0 then "読めない：「10月1日(水)」のような日ごとのシートがない"
-            else "読める（日ごとのシート " & Text.From(days) & " 枚）",
+            else "読める（日ごとのシート " & Text.From(days) & " 枚" & noYM & "）",
 
     // 出納：ファイル名の期間（8桁の数字2つ）が読む期間にかかるか
     SuiNote = (nm as text) as text =>
@@ -119,7 +132,7 @@ let
                      else if failed then "読めない：" & opened[Error][Message]
                      else if first = null then "読めない：シートが見つからない"
                      else if hIdx < 0 then "読めない：見出し「" & t[見出し] & "」のある行が、先頭 30 行にない"
-                     else if t[種類] = KindPlan then PlanNote(nm, sheets, isText, hasDay)
+                     else if t[種類] = KindPlan or t[種類] = KindFc then PlanNote(nm, sheets, isText, hasDay, t[窓])
                      else if t[種類] = KindSui then SuiNote(nm)
                      else "読める"
         in
@@ -132,7 +145,8 @@ let
 
     // フォルダ 1 つを調べる
     One = (t as record) as list =>
-        if t[フォルダ] = null then {Row(t[種類], null, null, null, null, null, null, "設定のフォルダパスが空欄（読まない）")}
+        (if t[注記] = null then {} else {Row(t[種類], null, null, null, null, null, null, t[注記])}) &
+        (if t[フォルダ] = null then {Row(t[種類], null, null, null, null, null, null, "設定のフォルダパスが空欄（読まない）")}
         else
             let
                 tried = try Table.RowCount(Folder.Files(t[フォルダ])),
@@ -154,10 +168,10 @@ let
                     {Row(t[種類], null, null, null, null, null, null,
                          "読めるファイルがない：名前に「" & t[目印] & "」が付く .xls .xlsx .csv .txt が、フォルダ " & t[フォルダ] & " にない")}
                     & Table.TransformRows(files, (f) => Check(t, f, newest))
-                else Table.TransformRows(files, (f) => Check(t, f, newest)),
+                else Table.TransformRows(files, (f) => Check(t, f, newest))),   // if 式は & の右では括弧が要る
 
     Period = Row("読む期間", null, null, null, null, null, null,
-                 Ymd(S0) & " ～ " & Ymd(E0) & "（発注日 " & Ymd(Date.From(Prm[発注日])) & "）"),
+                 Ymd(S0) & " ～ " & Ymd(E0) & "（発注日 " & Ymd(Date.From(Prm[発注日])) & "）。来週（F）＝ " & Ymd(F0) & " ～ " & Ymd(F1)),
     All    = {Period} & List.Combine(List.Transform(Targets, One)),
     T      = Table.FromRecords(All, type table [種類 = text, ファイル名 = nullable text, 更新日時 = nullable datetime,
                  形式 = nullable text, シート数 = nullable number, 見出しの行 = nullable number, 行数 = nullable number,

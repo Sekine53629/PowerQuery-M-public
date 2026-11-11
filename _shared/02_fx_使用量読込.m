@@ -9,7 +9,8 @@
 //    出力列：日付／薬品区分／略称／薬品名／患者数／数量／在庫量／在庫量_発注残込み／ファイル名／シート名
 //
 //    ファイルは ㉒ fx_ファイルを開く で開く（.xls の癖への対策と、文字のファイルの読み方はそちら）
-//      ・Excel ブック：シート名「10月1日(水)」とファイル名の年月から日付を決める
+//      ・Excel ブック：シート名「10月1日(水)」とファイル名の年月から日付を決める。ファイル名に年月（yyyymm）がなければ、
+//        読む期間（開始日～終了日）に入る年を当てる（予測フォルダに 1 ファイルだけ置く運用向け。0.12.1）
 //      ・文字のファイル（.csv／.txt。シートがない）：次のどちらかで日付を決める
 //          1. 見出しに「日付」の列があれば、その列の日付ごとに分ける（1 ファイルに何日分あってもよい）
 //          2. なければ、ファイル名の 8 桁の日付（yyyymmdd）の 1 日分として読む（1 日 1 ファイル）
@@ -78,11 +79,11 @@ let
                      tm = try DateTime.ToText(DateTime.From([Date modified]), "yyyyMMddHHmmss") otherwise "00000000000000"
                  in  d8 & "|" & tm & "|" & [Name], type text),
 
-    // 月をまたぐ週は前月のファイルに入ることがあるので、1か月前から見る
+    // 月をまたぐ週は前月のファイルに入ることがあるので、1か月前から見る。年月のないファイルはシートの日付で決めるので残す
     期間内ファイル = Table.SelectRows(キー追加, each
-                 [ファイル年月] <> null
-                 and [ファイル年月] >= Date.AddMonths(Date.StartOfMonth(startDate), -1)
-                 and [ファイル年月] <= endDate),
+                 [ファイル年月] = null
+                 or ([ファイル年月] >= Date.AddMonths(Date.StartOfMonth(startDate), -1)
+                     and [ファイル年月] <= endDate)),
 
     // 日付の読み取り（文字のファイル用）：日付のセル・yyyy/mm/dd・yyyy-mm-dd・yyyy年m月d日・8桁の数字
     ToDate = (val as any) as nullable date =>
@@ -149,7 +150,9 @@ let
 
     // シート名「10月1日(水)」とファイル名の年月から日付を作る
     //   月がファイルと同じ：ファイルの年月　／　月がファイルの翌月：翌月（12月→1月は翌年）
+    //   ファイル名に年月がないとき：読む期間（startDate～endDate）に入る年を当てる（読む期間は 1 年以内なので月日から年が決まる）
     //   「期間」で始まるシート（期間すべて）と、それ以外の月は読まない
+    年候補   = List.Distinct({Date.Year(startDate), Date.Year(endDate)}),
     日付追加 = Table.AddColumn(名前整形, "日付", each if [日付直接] <> null then [日付直接] else try
                  let
                      s     = [シート名2],
@@ -157,15 +160,20 @@ let
                      isDay = s <> null and not Text.StartsWith(s, "期間")
                              and Text.Contains(s, "月") and Text.Contains(s, "日")
                              and mPart <> "" and Text.Select(mPart, {"0" .. "9"}) = mPart,
-                     fy    = Date.Year([ファイル年月]),
-                     fm    = Date.Month([ファイル年月]),
                      m     = Number.From(mPart),
                      dd    = Number.From(Text.Select(Text.BetweenDelimiters(s, "月", "日"), {"0" .. "9"})),
+                     noYM  = [ファイル年月] = null,
+                     fy    = if noYM then 0 else Date.Year([ファイル年月]),
+                     fm    = if noYM then 0 else Date.Month([ファイル年月]),
                      same  = m = fm,
                      next  = m = (if fm = 12 then 1 else fm + 1),
-                     y     = if same then fy else if next and fm = 12 then fy + 1 else fy
+                     y     = if same then fy else if next and fm = 12 then fy + 1 else fy,
+                     inWin = List.Select(年候補, (yy) => let d = try #date(yy, m, dd) otherwise null
+                                                       in  d <> null and d >= startDate and d <= endDate)
                  in
-                     if isDay and (same or next) then #date(y, m, dd) else null
+                     if not isDay then null
+                     else if noYM then (if List.IsEmpty(inWin) then null else #date(List.First(inWin), m, dd))
+                     else if same or next then #date(y, m, dd) else null
                  otherwise null, type nullable date),
     日別のみ = Table.SelectRows(日付追加, each
                  [日付] <> null and [日付] >= startDate and [日付] <= endDate and not ([Data] is null)),

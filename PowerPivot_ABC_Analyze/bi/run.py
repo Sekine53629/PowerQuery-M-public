@@ -229,7 +229,7 @@ def r5_order(model, settings):
             policy, oq_p = "必要量", need
         oq_g = 0 if no_order else oq_p
         oq = oq_g if target else 0
-        over = target and tcls == "A" and mq > 0 and gs + oq > mq
+        over = target and tcls == "A" and mq > 0 and policy != "上限まで" and gs + oq > mq
         grp_txt = f"予定 {fmt0(g_plan[k])}・在庫 {fmt0(g_stock[k])} を合算"
         notes = []
         if excl: notes.append("発注除外")

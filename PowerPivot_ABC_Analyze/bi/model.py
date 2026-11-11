@@ -264,7 +264,18 @@ def _plan_parts(sheet, rows, kind, fy, fm, d8, start, end):
     if not mm or sheet.startswith("期間"):
         return []
     mo, dd = int(mm.group(1)), int(mm.group(2))
-    if mo == fm:
+    if fy is None:
+        y = None
+        for yy in sorted({start.year, end.year}):
+            try:
+                if start <= dt.date(yy, mo, dd) <= end:
+                    y = yy
+                    break
+            except ValueError:
+                pass
+        if y is None:
+            return []
+    elif mo == fm:
         y = fy
     elif mo == (1 if fm == 12 else fm + 1):
         y = fy + 1 if fm == 12 else fy
@@ -285,10 +296,11 @@ def load_plan(folder, start, end, prefix="薬品使用量", keep_zero=False):
     for f in sorted(files):
         name = os.path.basename(f)
         m = re.search(r"\d+", os.path.splitext(nz(name[len(prefix):]) or "")[0])     # 先頭の後ろで最初に出てくる数字の並び
-        if not m or len(m.group(0)) < 6:
-            continue
-        dg = m.group(0)
-        fy, fm = int(dg[:4]), int(dg[4:6])
+        dg = m.group(0) if m else ""
+        if len(dg) >= 6:
+            fy, fm = int(dg[:4]), int(dg[4:6])
+        else:
+            fy = fm = None                                   # 年月のないファイル：シートの月日に読む期間の年を当てる（0.12.1）
         d8 = to_date(dg[:8]) if len(dg) >= 8 else None
         sortkey = (os.path.getmtime(f), name)
         for s, rows0, kind in open_tables(f):

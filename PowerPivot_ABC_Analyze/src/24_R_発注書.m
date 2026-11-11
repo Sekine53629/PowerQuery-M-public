@@ -148,7 +148,8 @@ let
                       else need,
             oqG     = if noOrder then 0 else oqP,                          // まとまり（薬）としての目安
             oq      = if target then oqG else 0,
-            overCap = target and tcls = "A" and maxQ > 0 and gStock + oq > maxQ,
+            // 上限を超える：A の「上限まで」は在庫＋目安＝上限になるので出さない（在庫の端数の切り上げで 1 錠だけ超えることがあった。0.12.1）
+            overCap = target and tcls = "A" and maxQ > 0 and policy <> "上限まで" and gStock + oq > maxQ,
             grpTxt  = "予定 " & F(r[まとまりの予定]) & "・在庫 " & F(r[まとまりの在庫]) & " を合算",
             notes   = List.RemoveNulls({
                           if excl then "発注除外" else null,
